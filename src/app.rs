@@ -213,7 +213,6 @@ pub struct App {
     pub event_detail_scroll: usize,
 
     // Per-session event indexing
-    pub session_events: HashMap<String, VecDeque<HookEvent>>,
     pub active_session_ids: HashSet<String>,
     pub events_session_filter: Option<String>,
 
@@ -240,7 +239,6 @@ impl App {
             config_detail_scroll: 0,
             session_detail_scroll: 0,
             event_detail_scroll: 0,
-            session_events: HashMap::new(),
             active_session_ids: HashSet::new(),
             events_session_filter: None,
             session_records: HashMap::new(),
@@ -252,17 +250,8 @@ impl App {
         let sid = event.session_id.clone();
         let now = event.received_at;
 
-        // --- Old aggregation (kept temporarily for T3 cleanup) ---
-
-        // Track active session (old)
+        // Track active session
         self.active_session_ids.insert(sid.clone());
-
-        // Index event per session (old)
-        let session_queue = self.session_events.entry(sid.clone()).or_default();
-        session_queue.push_back(event.clone());
-        if session_queue.len() > MAX_EVENTS {
-            session_queue.pop_front();
-        }
 
         // --- Event-sourced session_records ---
 
@@ -1380,7 +1369,6 @@ mod tests {
     #[test]
     fn new_app_has_empty_session_tracking_fields() {
         let app = App::new(ConfigInventory::default());
-        assert!(app.session_events.is_empty());
         assert!(app.active_session_ids.is_empty());
         assert!(app.events_session_filter.is_none());
         assert!(app.session_records.is_empty());
@@ -1393,26 +1381,6 @@ mod tests {
         assert!(app.active_session_ids.contains("test-1"));
     }
 
-    #[test]
-    fn push_event_indexes_by_session() {
-        let mut app = App::new(ConfigInventory::default());
-        app.push_event(event_from_name("PreToolUse"));
-        app.push_event(event_from_name("PostToolUse"));
-
-        let session_events = app.session_events.get("test-1").unwrap();
-        assert_eq!(session_events.len(), 2);
-    }
-
-    #[test]
-    fn push_event_session_queue_respects_max() {
-        let mut app = App::new(ConfigInventory::default());
-        for i in 0..=MAX_EVENTS {
-            app.push_event(event_from_name(&format!("Event{}", i)));
-        }
-        let session_events = app.session_events.get("test-1").unwrap();
-        assert_eq!(session_events.len(), MAX_EVENTS);
-    }
-
     fn make_event_with_session(name: &str, session_id: &str) -> HookEvent {
         make_test_event(&format!(
             r#"{{"hook_event_name":"{}","session_id":"{}"}}"#,
@@ -1421,14 +1389,12 @@ mod tests {
     }
 
     #[test]
-    fn push_event_indexes_multiple_sessions_separately() {
+    fn push_event_tracks_multiple_sessions() {
         let mut app = App::new(ConfigInventory::default());
         app.push_event(make_event_with_session("PreToolUse", "sess-a"));
         app.push_event(make_event_with_session("PreToolUse", "sess-b"));
         app.push_event(make_event_with_session("PostToolUse", "sess-a"));
 
-        assert_eq!(app.session_events.get("sess-a").unwrap().len(), 2);
-        assert_eq!(app.session_events.get("sess-b").unwrap().len(), 1);
         assert!(app.active_session_ids.contains("sess-a"));
         assert!(app.active_session_ids.contains("sess-b"));
     }
