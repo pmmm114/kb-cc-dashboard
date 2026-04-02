@@ -19,23 +19,6 @@ pub fn detail_line(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
-pub fn format_relative_time(unix_ts: u64) -> String {
-    if unix_ts == 0 {
-        return "unknown".to_string();
-    }
-    let now = chrono::Utc::now().timestamp() as u64;
-    let diff = now.saturating_sub(unix_ts);
-    if diff < 60 {
-        format!("{}s ago", diff)
-    } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
-    } else if diff < 86400 {
-        format!("{}h ago", diff / 3600)
-    } else {
-        format!("{}d ago", diff / 86400)
-    }
-}
-
 pub fn format_relative_time_dt(dt: &DateTime<Utc>) -> String {
     let diff = Utc::now() - *dt;
     let secs = diff.num_seconds();
@@ -97,47 +80,6 @@ mod tests {
         let label_text = spans[0].content.to_string();
         assert_eq!(label_text.len(), LABEL_WIDTH);
         assert!(label_text.starts_with("Phase"));
-    }
-
-    #[test]
-    fn format_relative_time_seconds() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now - 30);
-        assert!(result.contains("s ago"));
-    }
-
-    #[test]
-    fn format_relative_time_minutes() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now - 120);
-        assert!(result.contains("m ago"));
-    }
-
-    #[test]
-    fn format_relative_time_hours() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now - 7200);
-        assert!(result.contains("h ago"));
-    }
-
-    #[test]
-    fn format_relative_time_days() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now - 172800);
-        assert!(result.contains("d ago"));
-    }
-
-    #[test]
-    fn format_relative_time_future_timestamp() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now + 1000);
-        assert!(result.contains("0s ago"));
-    }
-
-    #[test]
-    fn format_relative_time_zero_returns_unknown() {
-        let result = format_relative_time(0);
-        assert_eq!(result, "unknown");
     }
 
     #[test]

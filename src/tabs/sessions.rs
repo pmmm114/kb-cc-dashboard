@@ -202,9 +202,10 @@ fn draw_segment_list(f: &mut Frame, app: &App, area: Rect) {
                 Color::DarkGray
             };
 
-            // Truncate prompt text to 30 chars
-            let prompt_display = if segment.prompt_text.len() > 30 {
-                format!("{}...", &segment.prompt_text[..30])
+            // Truncate prompt text to 30 characters (UTF-8 safe)
+            let prompt_display = if segment.prompt_text.chars().count() > 30 {
+                let truncated: String = segment.prompt_text.chars().take(30).collect();
+                format!("{}...", truncated)
             } else {
                 segment.prompt_text.clone()
             };
@@ -289,6 +290,53 @@ fn draw_agent_tree(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(""));
+
+    // Orchestrator context (instructions loaded at orchestrator level)
+    let oc = &segment.orchestrator_context;
+    let has_orch_ctx = !oc.agent_definitions.is_empty()
+        || !oc.skills.is_empty()
+        || !oc.rules.is_empty()
+        || !oc.memory.is_empty()
+        || !oc.other.is_empty();
+    if has_orch_ctx {
+        lines.push(Line::from(Span::styled(
+            "Orchestrator Context",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if !oc.memory.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  Memory: {}", oc.memory.join(", ")),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if !oc.rules.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  Rules: {}", oc.rules.join(", ")),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if !oc.skills.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  Skills: {}", oc.skills.join(", ")),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if !oc.agent_definitions.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  Agents: {}", oc.agent_definitions.join(", ")),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if !oc.other.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("  Other: {}", oc.other.join(", ")),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
 
     if segment.agents.is_empty() && segment.orchestrator_tools.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -466,6 +514,7 @@ mod tests {
                 ended_at: None,
                 agents: Vec::new(),
                 orchestrator_tools: Vec::new(),
+                orchestrator_context: AgentContext::default(),
                 tasks: Vec::new(),
             }],
             next_agent_id: 0,
@@ -584,6 +633,7 @@ mod tests {
             ended_at: Some(now - Duration::minutes(3)),
             agents: Vec::new(),
             orchestrator_tools: Vec::new(),
+            orchestrator_context: AgentContext::default(),
             tasks: Vec::new(),
         });
         app.session_records.insert("sess12345678".to_string(), session);
@@ -613,6 +663,7 @@ mod tests {
             ended_at: None,
             agents: Vec::new(),
             orchestrator_tools: Vec::new(),
+            orchestrator_context: AgentContext::default(),
             tasks: Vec::new(),
         });
         app.session_records.insert("sess12345678".to_string(), session);
@@ -854,6 +905,49 @@ mod tests {
         let output = render_sessions_widget(&app, 120, 20);
         // Live indicator is U+25C9 (fisheye)
         assert!(output.contains("\u{25C9}"), "Expected live indicator (fisheye), got:\n{}", output);
+    }
+
+    // --- B1: UTF-8 safe truncation ---
+
+    #[test]
+    fn segment_panel_renders_korean_prompt_without_panic() {
+        let mut app = App::new(ConfigInventory::default());
+        let mut session = make_session_record("sess12345678", false);
+        // Korean text that would panic with byte-slicing at position 30
+        session.prompt_segments.push(PromptSegment {
+            prompt_text: "리팩터링을 진행해주세요 이것은 긴 한국어 프롬프트입니다".to_string(),
+            started_at: Utc::now(),
+            ended_at: None,
+            agents: Vec::new(),
+            orchestrator_tools: Vec::new(),
+            orchestrator_context: AgentContext::default(),
+            tasks: Vec::new(),
+        });
+        app.session_records
+            .insert("sess12345678".to_string(), session);
+        app.session_focus = SessionFocus::Segment;
+        // Must not panic
+        let _output = render_sessions_widget(&app, 120, 20);
+    }
+
+    #[test]
+    fn segment_panel_renders_emoji_prompt_without_panic() {
+        let mut app = App::new(ConfigInventory::default());
+        let mut session = make_session_record("sess12345678", false);
+        session.prompt_segments.push(PromptSegment {
+            prompt_text: "Fix the bug 🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛".to_string(),
+            started_at: Utc::now(),
+            ended_at: None,
+            agents: Vec::new(),
+            orchestrator_tools: Vec::new(),
+            orchestrator_context: AgentContext::default(),
+            tasks: Vec::new(),
+        });
+        app.session_records
+            .insert("sess12345678".to_string(), session);
+        app.session_focus = SessionFocus::Segment;
+        // Must not panic
+        let _output = render_sessions_widget(&app, 120, 20);
     }
 
     // --- Selection stability: segment bounds ---

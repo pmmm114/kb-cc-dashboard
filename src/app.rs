@@ -26,6 +26,7 @@ pub struct AgentRecord {
     pub id: AgentId,
     pub agent_type: String,
     pub cwd: Option<String>,
+    #[allow(dead_code)] // Planned for agent duration display
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub context: AgentContext,
@@ -54,12 +55,14 @@ pub struct PromptSegment {
     pub ended_at: Option<DateTime<Utc>>,
     pub agents: Vec<AgentId>,
     pub orchestrator_tools: Vec<ToolRecord>,
+    pub orchestrator_context: AgentContext,
     pub tasks: Vec<TaskInfo>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SessionRecord {
     pub session_id: String,
+    #[allow(dead_code)] // Planned for session age display
     pub first_seen_at: DateTime<Utc>,
     pub last_event_at: DateTime<Utc>,
     pub ended: bool,
@@ -298,6 +301,7 @@ impl App {
                         ended_at: None,
                         agents: Vec::new(),
                         orchestrator_tools: Vec::new(),
+                        orchestrator_context: AgentContext::default(),
                         tasks: Vec::new(),
                     };
                     if let Some(record) = self.session_records.get_mut(&sid) {
@@ -357,29 +361,19 @@ impl App {
 
                         if let Some(aid) = agent_id {
                             if let Some(agent) = self.agent_record_mut(&sid, aid) {
-                                match category {
-                                    InstructionCategory::AgentDefinition => {
-                                        agent.context.agent_definitions.push(display_name);
-                                    }
-                                    InstructionCategory::Skill => {
-                                        agent.context.skills.push(display_name);
-                                    }
-                                    InstructionCategory::Rule => {
-                                        agent.context.rules.push(display_name);
-                                    }
-                                    InstructionCategory::Memory => {
-                                        agent.context.memory.push(display_name);
-                                    }
-                                    InstructionCategory::Other => {
-                                        agent.context.other.push(display_name);
-                                    }
-                                }
+                                Self::classify_into_context(
+                                    &mut agent.context,
+                                    category,
+                                    display_name,
+                                );
                             }
+                        } else if let Some(seg) = self.current_segment_mut(&sid) {
+                            Self::classify_into_context(
+                                &mut seg.orchestrator_context,
+                                category,
+                                display_name,
+                            );
                         }
-                        // If no matching agent, the instruction goes to
-                        // the orchestrator context — which is segment-level.
-                        // (Handled by the old aggregation for now; T5 will
-                        // add orchestrator context to segments.)
                     }
                 }
                 EventKind::PostToolUse => {
@@ -521,19 +515,37 @@ impl App {
                 }
                 EventKind::TaskCompleted => {
                     if let Some(task_id) = event.payload.get("task_id").and_then(|v| v.as_str()) {
-                        if let Some(seg) = self.current_segment_mut(&sid) {
-                            if let Some(task) =
-                                seg.tasks.iter_mut().rfind(|t| t.task_id == task_id)
-                            {
-                                task.completed = true;
+                        // Search all segments in reverse to find the task
+                        if let Some(record) = self.session_records.get_mut(&sid) {
+                            for seg in record.prompt_segments.iter_mut().rev() {
+                                if let Some(task) =
+                                    seg.tasks.iter_mut().rfind(|t| t.task_id == task_id)
+                                {
+                                    task.completed = true;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
                 EventKind::SessionStart => {
-                    // Session already created by get_or_create_session above.
-                    // SessionStart can re-open an ended session (handled by the
-                    // already_ended check above allowing SessionStart through).
+                    // Reopen a previously ended session
+                    if let Some(record) = self.session_records.get_mut(&sid) {
+                        if record.ended {
+                            record.ended = false;
+                            self.active_session_ids.insert(sid.clone());
+                            // Create a fresh segment for the new session lifecycle
+                            record.prompt_segments.push(PromptSegment {
+                                prompt_text: "(session initialization)".to_string(),
+                                started_at: now,
+                                ended_at: None,
+                                agents: Vec::new(),
+                                orchestrator_tools: Vec::new(),
+                                orchestrator_context: AgentContext::default(),
+                                tasks: Vec::new(),
+                            });
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -878,6 +890,7 @@ impl App {
                     ended_at: None,
                     agents: Vec::new(),
                     orchestrator_tools: Vec::new(),
+                    orchestrator_context: AgentContext::default(),
                     tasks: Vec::new(),
                 }],
                 next_agent_id: 0,
@@ -897,17 +910,34 @@ impl App {
     }
 
     /// Find a matching agent for routing events.
-    /// Prefers active agents over completed, matches by agent_type then cwd.
+    /// Prefers active agents with matching CWD, then active by type, then completed.
     pub fn find_agent_for_routing(
         &self,
         sid: &str,
         agent_context_type: Option<&str>,
-        _cwd: Option<&str>,
+        cwd: Option<&str>,
     ) -> Option<AgentId> {
         let act = agent_context_type?;
         let record = self.session_records.get(sid)?;
 
-        // Prefer active agents, search from newest to oldest
+        // 1. Active agent with matching CWD (most specific)
+        if let Some(cwd_val) = cwd {
+            let cwd_match = record
+                .agent_records
+                .iter()
+                .rev()
+                .find(|a| {
+                    a.is_active()
+                        && a.agent_type == act
+                        && a.cwd.as_deref() == Some(cwd_val)
+                })
+                .map(|a| a.id);
+            if cwd_match.is_some() {
+                return cwd_match;
+            }
+        }
+
+        // 2. Active agent by type (newest first)
         let active_match = record
             .agent_records
             .iter()
@@ -918,13 +948,28 @@ impl App {
             return active_match;
         }
 
-        // Fallback to completed agents
+        // 3. Fallback to completed agents
         record
             .agent_records
             .iter()
             .rev()
             .find(|a| a.agent_type == act)
             .map(|a| a.id)
+    }
+
+    /// Classify an instruction into the appropriate context category.
+    fn classify_into_context(
+        ctx: &mut AgentContext,
+        category: InstructionCategory,
+        display_name: String,
+    ) {
+        match category {
+            InstructionCategory::AgentDefinition => ctx.agent_definitions.push(display_name),
+            InstructionCategory::Skill => ctx.skills.push(display_name),
+            InstructionCategory::Rule => ctx.rules.push(display_name),
+            InstructionCategory::Memory => ctx.memory.push(display_name),
+            InstructionCategory::Other => ctx.other.push(display_name),
+        }
     }
 
     /// Get a mutable reference to an AgentRecord by id.
@@ -959,11 +1004,6 @@ impl App {
     pub fn selected_session_record(&self) -> Option<&SessionRecord> {
         let records = self.visible_session_records();
         records.get(self.session_selected).copied()
-    }
-
-    /// Returns true if the session has sent events to the dashboard
-    pub fn is_session_active(&self, session_id: &str) -> bool {
-        self.active_session_ids.contains(session_id)
     }
 
     /// Cycle events_session_filter through None -> each active session -> None
@@ -2306,6 +2346,54 @@ mod tests {
     }
 
     #[test]
+    fn session_start_reopens_ended_session() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_event_with_session("SessionEnd", "s1"));
+
+        // Verify ended
+        assert!(app.session_records.get("s1").unwrap().ended);
+        assert!(!app.active_session_ids.contains("s1"));
+
+        // SessionStart should reopen the session
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        let record = app.session_records.get("s1").unwrap();
+        assert!(
+            !record.ended,
+            "SessionStart must reopen an ended session"
+        );
+        assert!(
+            app.active_session_ids.contains("s1"),
+            "SessionStart must re-add session to active_session_ids"
+        );
+    }
+
+    #[test]
+    fn session_start_reopen_creates_fresh_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_event_with_session("SessionEnd", "s1"));
+        let seg_count_before = app.session_records.get("s1").unwrap().prompt_segments.len();
+
+        // Reopen
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        let record = app.session_records.get("s1").unwrap();
+        assert_eq!(
+            record.prompt_segments.len(),
+            seg_count_before + 1,
+            "SessionStart reopen must create a fresh segment"
+        );
+
+        // Send a UserPromptSubmit to verify the new lifecycle works
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"new lifecycle"}"#,
+        ));
+        let record = app.session_records.get("s1").unwrap();
+        let last_seg = record.prompt_segments.last().unwrap();
+        assert_eq!(last_seg.prompt_text, "new lifecycle");
+    }
+
+    #[test]
     fn push_event_session_end_force_closes_agents() {
         let mut app = App::new(ConfigInventory::default());
         app.push_event(make_test_event(
@@ -2373,6 +2461,37 @@ mod tests {
     }
 
     #[test]
+    fn task_completed_finds_task_in_earlier_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        // Create task in first prompt segment
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"first"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"TaskCreated","session_id":"s1","task_id":"T1","teammate_name":"agent-a"}"#,
+        ));
+
+        // New prompt creates a new segment
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"second"}"#,
+        ));
+
+        // TaskCompleted arrives in the new segment context
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"TaskCompleted","session_id":"s1","task_id":"T1"}"#,
+        ));
+
+        // The task in the OLD segment (index 1, since seg 0 is init) should be completed
+        let record = app.session_records.get("s1").unwrap();
+        let task_seg = &record.prompt_segments[1]; // first user prompt segment
+        assert_eq!(task_seg.tasks.len(), 1);
+        assert!(
+            task_seg.tasks[0].completed,
+            "TaskCompleted must find task in earlier segment"
+        );
+    }
+
+    #[test]
     fn push_event_segment_zero_absorbs_pre_prompt_events() {
         let mut app = App::new(ConfigInventory::default());
         // Send InstructionsLoaded and tool events before any UserPromptSubmit
@@ -2421,6 +2540,97 @@ mod tests {
             record.agent_records.len(),
             agent_count_before,
             "No new agents should be created after SessionEnd"
+        );
+    }
+
+    // --- G2: Orchestrator-level instructions ---
+
+    #[test]
+    fn instructions_loaded_without_agent_stored_in_orchestrator_context() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        // InstructionsLoaded with no agent_context_type (orchestrator level)
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/home/.claude/CLAUDE.md"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/home/.claude/rules/workflow.md"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        let seg = &record.prompt_segments[0];
+        assert!(
+            seg.orchestrator_context.memory.contains(&"CLAUDE.md".to_string()),
+            "Orchestrator CLAUDE.md should be stored in segment's orchestrator_context"
+        );
+        assert!(
+            seg.orchestrator_context.rules.contains(&"workflow.md".to_string()),
+            "Orchestrator rules should be stored in segment's orchestrator_context"
+        );
+    }
+
+    // --- G1: CWD-aware agent routing ---
+
+    #[test]
+    fn find_agent_routes_by_cwd_when_multiple_same_type() {
+        let mut app = App::new(ConfigInventory::default());
+        // Start two tdd-implementer agents with different CWDs
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd-implementer","cwd":"/tmp/task-1"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd-implementer","cwd":"/tmp/task-2"}"#,
+        ));
+
+        // Send PostToolUse with cwd matching the FIRST agent
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Edit","agent_context_type":"tdd-implementer","cwd":"/tmp/task-1"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        // Agent 0 (cwd=/tmp/task-1) should have the tool, not agent 1
+        let agent_0_edit = record.agent_records[0]
+            .tools
+            .iter()
+            .find(|t| t.name == "Edit");
+        let agent_1_edit = record.agent_records[1]
+            .tools
+            .iter()
+            .find(|t| t.name == "Edit");
+        assert!(
+            agent_0_edit.is_some(),
+            "Tool should route to agent with matching CWD (agent 0)"
+        );
+        assert!(
+            agent_1_edit.is_none(),
+            "Tool should NOT route to agent with non-matching CWD (agent 1)"
+        );
+    }
+
+    #[test]
+    fn find_agent_falls_back_to_newest_when_no_cwd_match() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd","cwd":"/tmp/a"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd","cwd":"/tmp/b"}"#,
+        ));
+
+        // PostToolUse with no CWD match
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Read","agent_context_type":"tdd","cwd":"/tmp/unknown"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        // Should fall back to newest (agent 1)
+        let agent_1_read = record.agent_records[1]
+            .tools
+            .iter()
+            .find(|t| t.name == "Read");
+        assert!(
+            agent_1_read.is_some(),
+            "Tool should fall back to newest agent when no CWD match"
         );
     }
 
