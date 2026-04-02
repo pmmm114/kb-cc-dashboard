@@ -841,4 +841,31 @@ mod tests {
         app.session_focus = SessionFocus::Detail;
         let _output = render_sessions_widget(&app, 120, 20);
     }
+
+    // --- Live indicator test ---
+
+    #[test]
+    fn session_list_shows_live_indicator() {
+        let mut app = App::new(ConfigInventory::default());
+        let mut session = make_session_record("abcdef1234567890", false);
+        // last_event_at within 5 seconds -> live indicator
+        session.last_event_at = Utc::now() - Duration::seconds(1);
+        app.session_records.insert("abcdef1234567890".to_string(), session);
+        let output = render_sessions_widget(&app, 120, 20);
+        // Live indicator is U+25C9 (fisheye)
+        assert!(output.contains("\u{25C9}"), "Expected live indicator (fisheye), got:\n{}", output);
+    }
+
+    // --- Selection stability: segment bounds ---
+
+    #[test]
+    fn segment_selection_stays_within_bounds() {
+        let mut app = App::new(ConfigInventory::default());
+        let session = make_session_record("sess12345678", false);
+        app.session_records.insert("sess12345678".to_string(), session);
+        // Only 1 segment (segment zero), set selection beyond that
+        app.session_segment_selected = 10;
+        // Rendering should not panic
+        let _output = render_sessions_widget(&app, 120, 20);
+    }
 }
