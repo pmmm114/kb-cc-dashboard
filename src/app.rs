@@ -1,6 +1,7 @@
 use crate::config::ConfigInventory;
 use crate::event::{EventKind, HookEvent};
 use crate::session::SessionState;
+use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const MAX_EVENTS: usize = 500;
@@ -25,6 +26,85 @@ pub struct TaskInfo {
     pub task_id: String,
     pub teammate_name: Option<String>,
     pub completed: bool,
+}
+
+pub type AgentId = u64;
+
+#[derive(Clone, Debug)]
+pub struct AgentRecord {
+    pub id: AgentId,
+    pub agent_type: String,
+    pub cwd: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub context: AgentContext,
+    pub tools: Vec<ToolRecord>,
+}
+
+impl AgentRecord {
+    pub fn is_active(&self) -> bool {
+        self.ended_at.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AgentContext {
+    pub agent_definitions: Vec<String>,
+    pub skills: Vec<String>,
+    pub rules: Vec<String>,
+    pub memory: Vec<String>,
+    pub other: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PromptSegment {
+    pub prompt_text: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub agents: Vec<AgentId>,
+    pub orchestrator_tools: Vec<ToolRecord>,
+    pub tasks: Vec<TaskInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_event_at: DateTime<Utc>,
+    pub ended: bool,
+    pub agent_records: Vec<AgentRecord>,
+    pub prompt_segments: Vec<PromptSegment>,
+    pub next_agent_id: AgentId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFocus {
+    List,
+    Segment,
+    Detail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionCategory {
+    AgentDefinition,
+    Skill,
+    Rule,
+    Memory,
+    Other,
+}
+
+pub fn classify_instruction_path(path: &str) -> InstructionCategory {
+    if path.contains("/agents/") && path.ends_with(".md") {
+        InstructionCategory::AgentDefinition
+    } else if path.contains("/skills/") && path.contains("SKILL.md") {
+        InstructionCategory::Skill
+    } else if path.contains("/rules/") && path.ends_with(".md") {
+        InstructionCategory::Rule
+    } else if path.ends_with("CLAUDE.md") {
+        InstructionCategory::Memory
+    } else {
+        InstructionCategory::Other
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2033,5 +2113,117 @@ mod tests {
         assert_eq!(app.event_selected, 0, "Filter change must reset event_selected");
         assert_eq!(app.event_detail_scroll, 0, "Filter change must reset scroll");
         assert_eq!(app.event_focus, ListDetailFocus::List, "Filter change must reset focus");
+    }
+
+    // --- T1: New data model type tests ---
+
+    #[test]
+    fn agent_record_is_active_when_ended_at_is_none() {
+        let record = AgentRecord {
+            id: 1,
+            agent_type: "planner".to_string(),
+            cwd: None,
+            started_at: Utc::now(),
+            ended_at: None,
+            context: AgentContext::default(),
+            tools: vec![],
+        };
+        assert!(record.is_active());
+    }
+
+    #[test]
+    fn agent_record_is_not_active_when_ended_at_is_some() {
+        let record = AgentRecord {
+            id: 1,
+            agent_type: "planner".to_string(),
+            cwd: None,
+            started_at: Utc::now(),
+            ended_at: Some(Utc::now()),
+            context: AgentContext::default(),
+            tools: vec![],
+        };
+        assert!(!record.is_active());
+    }
+
+    #[test]
+    fn classify_agents_md_as_agent_definition() {
+        assert_eq!(
+            classify_instruction_path("/home/user/.claude/agents/planner.md"),
+            InstructionCategory::AgentDefinition
+        );
+    }
+
+    #[test]
+    fn classify_skill_md_as_skill() {
+        assert_eq!(
+            classify_instruction_path("/home/user/.claude/skills/commit-convention/SKILL.md"),
+            InstructionCategory::Skill
+        );
+    }
+
+    #[test]
+    fn classify_rules_md_as_rule() {
+        assert_eq!(
+            classify_instruction_path("/home/user/.claude/rules/code-quality.md"),
+            InstructionCategory::Rule
+        );
+    }
+
+    #[test]
+    fn classify_nested_rules_md_as_rule() {
+        assert_eq!(
+            classify_instruction_path("/home/user/.claude/rules/config/eval-quality.md"),
+            InstructionCategory::Rule
+        );
+    }
+
+    #[test]
+    fn classify_claude_md_as_memory() {
+        assert_eq!(
+            classify_instruction_path("/home/user/.claude/CLAUDE.md"),
+            InstructionCategory::Memory
+        );
+    }
+
+    #[test]
+    fn classify_project_claude_md_as_memory() {
+        assert_eq!(
+            classify_instruction_path("/home/user/project/.claude/CLAUDE.md"),
+            InstructionCategory::Memory
+        );
+    }
+
+    #[test]
+    fn classify_unknown_path_as_other() {
+        assert_eq!(
+            classify_instruction_path("/some/random/file.txt"),
+            InstructionCategory::Other
+        );
+    }
+
+    #[test]
+    fn session_focus_equality() {
+        assert_eq!(SessionFocus::List, SessionFocus::List);
+        assert_eq!(SessionFocus::Segment, SessionFocus::Segment);
+        assert_eq!(SessionFocus::Detail, SessionFocus::Detail);
+        assert_ne!(SessionFocus::List, SessionFocus::Segment);
+        assert_ne!(SessionFocus::Segment, SessionFocus::Detail);
+    }
+
+    #[test]
+    fn session_focus_is_copy() {
+        let a = SessionFocus::List;
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn agent_context_default_is_empty() {
+        let ctx = AgentContext::default();
+        assert!(ctx.agent_definitions.is_empty());
+        assert!(ctx.skills.is_empty());
+        assert!(ctx.rules.is_empty());
+        assert!(ctx.memory.is_empty());
+        assert!(ctx.other.is_empty());
     }
 }
