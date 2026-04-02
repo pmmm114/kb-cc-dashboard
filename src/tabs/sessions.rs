@@ -252,6 +252,7 @@ mod tests {
     use crate::config::ConfigInventory;
     use crate::session::{Phase, SessionState};
     use crate::test_helpers::test_utils::buffer_to_string;
+    use std::collections::HashMap;
     use ratatui::{backend::TestBackend, Terminal};
 
     fn render_sessions(app: &App, width: u16, height: u16) -> String {
@@ -285,6 +286,7 @@ mod tests {
             planner_block_count: 0,
             plan_communicated: true,
             file_path: String::new(),
+            tasks: HashMap::new(),
         }
     }
 
