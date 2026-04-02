@@ -211,7 +211,7 @@ pub struct App {
     pub should_quit: bool,
 
     // Per-tab focus state
-    pub session_focus: ListDetailFocus,
+    pub session_focus: SessionFocus,
     pub event_focus: ListDetailFocus,
 
     // Per-tab detail panel scroll offsets
@@ -229,6 +229,10 @@ pub struct App {
     pub session_orchestrator_tools: HashMap<String, Vec<ToolRecord>>,
     pub session_orchestrator_rules: HashMap<String, HashSet<String>>,
     pub session_tasks: HashMap<String, Vec<TaskInfo>>,
+
+    // Event-sourced session data (new — T2)
+    pub session_records: HashMap<String, SessionRecord>,
+    pub session_segment_selected: usize,
 }
 
 impl App {
@@ -245,7 +249,7 @@ impl App {
             event_selected: 0,
             event_auto_scroll: true,
             should_quit: false,
-            session_focus: ListDetailFocus::List,
+            session_focus: SessionFocus::List,
             event_focus: ListDetailFocus::List,
             config_detail_scroll: 0,
             session_detail_scroll: 0,
@@ -257,23 +261,28 @@ impl App {
             session_orchestrator_tools: HashMap::new(),
             session_orchestrator_rules: HashMap::new(),
             session_tasks: HashMap::new(),
+            session_records: HashMap::new(),
+            session_segment_selected: 0,
         }
     }
 
     pub fn push_event(&mut self, event: HookEvent) {
         let sid = event.session_id.clone();
+        let now = event.received_at;
 
-        // Track active session
+        // --- Old aggregation (kept temporarily for T3 cleanup) ---
+
+        // Track active session (old)
         self.active_session_ids.insert(sid.clone());
 
-        // Index event per session
+        // Index event per session (old)
         let session_queue = self.session_events.entry(sid.clone()).or_default();
         session_queue.push_back(event.clone());
         if session_queue.len() > MAX_EVENTS {
             session_queue.pop_front();
         }
 
-        // Aggregate based on event kind
+        // Old aggregation based on event kind
         match event.kind() {
             EventKind::SubagentStart => {
                 if let Some(agent_type) = event.payload.get("agent_type").and_then(|v| v.as_str())
@@ -304,7 +313,6 @@ impl App {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
                     if let Some(agents) = self.session_active_agents.get_mut(&sid) {
-                        // Remove last match by agent_type + cwd
                         if let Some(pos) = agents.iter().rposition(|a| {
                             a.agent_type == agent_type && a.cwd == cwd
                         }) {
@@ -388,6 +396,283 @@ impl App {
                 self.active_session_ids.remove(&sid);
             }
             _ => {}
+        }
+
+        // --- New event-sourced session_records ---
+
+        // BUG-2 fix: skip re-activation if session already ended (except SessionStart)
+        let already_ended = self
+            .session_records
+            .get(&sid)
+            .map(|r| r.ended)
+            .unwrap_or(false);
+        if already_ended && event.kind() != EventKind::SessionStart {
+            // Still add to flat event queue below, but do not modify session_records
+        } else {
+            // Get or create the session record (creates segment zero)
+            self.get_or_create_session(&sid, now);
+
+            match event.kind() {
+                EventKind::UserPromptSubmit => {
+                    let prompt = event
+                        .payload
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Close previous segment
+                    if let Some(seg) = self.current_segment_mut(&sid) {
+                        if seg.ended_at.is_none() {
+                            seg.ended_at = Some(now);
+                        }
+                    }
+
+                    // Create new segment
+                    let new_seg = PromptSegment {
+                        prompt_text: prompt,
+                        started_at: now,
+                        ended_at: None,
+                        agents: Vec::new(),
+                        orchestrator_tools: Vec::new(),
+                        tasks: Vec::new(),
+                    };
+                    if let Some(record) = self.session_records.get_mut(&sid) {
+                        record.prompt_segments.push(new_seg);
+                    }
+                }
+                EventKind::SubagentStart => {
+                    if let Some(agent_type) =
+                        event.payload.get("agent_type").and_then(|v| v.as_str())
+                    {
+                        let cwd = event
+                            .payload
+                            .get("cwd")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        if let Some(record) = self.session_records.get_mut(&sid) {
+                            let agent_id = record.next_agent_id;
+                            record.next_agent_id += 1;
+                            let agent = AgentRecord {
+                                id: agent_id,
+                                agent_type: agent_type.to_string(),
+                                cwd,
+                                started_at: now,
+                                ended_at: None,
+                                context: AgentContext::default(),
+                                tools: Vec::new(),
+                            };
+                            record.agent_records.push(agent);
+                            // Add AgentId to current segment
+                            if let Some(seg) = record.prompt_segments.last_mut() {
+                                seg.agents.push(agent_id);
+                            }
+                        }
+                    }
+                }
+                EventKind::InstructionsLoaded => {
+                    if let Some(file_path) =
+                        event.payload.get("file_path").and_then(|v| v.as_str())
+                    {
+                        let category = classify_instruction_path(file_path);
+                        let display_name = std::path::Path::new(file_path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(file_path)
+                            .to_string();
+                        let agent_ctx = event
+                            .payload
+                            .get("agent_context_type")
+                            .and_then(|v| v.as_str());
+                        let agent_cwd = event
+                            .payload
+                            .get("cwd")
+                            .and_then(|v| v.as_str());
+
+                        let agent_id =
+                            self.find_agent_for_routing(&sid, agent_ctx, agent_cwd);
+
+                        if let Some(aid) = agent_id {
+                            if let Some(agent) = self.agent_record_mut(&sid, aid) {
+                                match category {
+                                    InstructionCategory::AgentDefinition => {
+                                        agent.context.agent_definitions.push(display_name);
+                                    }
+                                    InstructionCategory::Skill => {
+                                        agent.context.skills.push(display_name);
+                                    }
+                                    InstructionCategory::Rule => {
+                                        agent.context.rules.push(display_name);
+                                    }
+                                    InstructionCategory::Memory => {
+                                        agent.context.memory.push(display_name);
+                                    }
+                                    InstructionCategory::Other => {
+                                        agent.context.other.push(display_name);
+                                    }
+                                }
+                            }
+                        }
+                        // If no matching agent, the instruction goes to
+                        // the orchestrator context — which is segment-level.
+                        // (Handled by the old aggregation for now; T5 will
+                        // add orchestrator context to segments.)
+                    }
+                }
+                EventKind::PostToolUse => {
+                    // BUG-1 fix: only PostToolUse increments count (NOT PreToolUse)
+                    if let Some(tool_name) =
+                        event.payload.get("tool_name").and_then(|v| v.as_str())
+                    {
+                        let agent_ctx = event
+                            .payload
+                            .get("agent_context_type")
+                            .and_then(|v| v.as_str());
+                        let agent_cwd = event
+                            .payload
+                            .get("cwd")
+                            .and_then(|v| v.as_str());
+                        let agent_id =
+                            self.find_agent_for_routing(&sid, agent_ctx, agent_cwd);
+
+                        if let Some(aid) = agent_id {
+                            if let Some(agent) = self.agent_record_mut(&sid, aid) {
+                                let tr = Self::get_or_create_tool(&mut agent.tools, tool_name);
+                                tr.count += 1;
+                            }
+                        } else {
+                            // Orchestrator tool
+                            if let Some(seg) = self.current_segment_mut(&sid) {
+                                let tr =
+                                    Self::get_or_create_tool(&mut seg.orchestrator_tools, tool_name);
+                                tr.count += 1;
+                            }
+                        }
+                    }
+                }
+                EventKind::PostToolUseFailure => {
+                    if let Some(tool_name) =
+                        event.payload.get("tool_name").and_then(|v| v.as_str())
+                    {
+                        let agent_ctx = event
+                            .payload
+                            .get("agent_context_type")
+                            .and_then(|v| v.as_str());
+                        let agent_cwd = event
+                            .payload
+                            .get("cwd")
+                            .and_then(|v| v.as_str());
+                        let agent_id =
+                            self.find_agent_for_routing(&sid, agent_ctx, agent_cwd);
+
+                        if let Some(aid) = agent_id {
+                            if let Some(agent) = self.agent_record_mut(&sid, aid) {
+                                let tr = Self::get_or_create_tool(&mut agent.tools, tool_name);
+                                tr.count += 1;
+                                tr.failure_count += 1;
+                            }
+                        } else {
+                            if let Some(seg) = self.current_segment_mut(&sid) {
+                                let tr =
+                                    Self::get_or_create_tool(&mut seg.orchestrator_tools, tool_name);
+                                tr.count += 1;
+                                tr.failure_count += 1;
+                            }
+                        }
+                    }
+                }
+                EventKind::PreToolUse => {
+                    // BUG-1 fix: PreToolUse does NOT increment tool count
+                    // Event is stored in the flat queue only
+                }
+                EventKind::SubagentStop => {
+                    if let Some(agent_type) =
+                        event.payload.get("agent_type").and_then(|v| v.as_str())
+                    {
+                        let cwd = event
+                            .payload
+                            .get("cwd")
+                            .and_then(|v| v.as_str());
+                        // Find matching active agent and set ended_at (preserve data)
+                        if let Some(record) = self.session_records.get_mut(&sid) {
+                            if let Some(agent) = record
+                                .agent_records
+                                .iter_mut()
+                                .rev()
+                                .find(|a| {
+                                    a.is_active()
+                                        && a.agent_type == agent_type
+                                        && a.cwd.as_deref() == cwd
+                                })
+                            {
+                                agent.ended_at = Some(now);
+                            }
+                        }
+                    }
+                }
+                EventKind::Stop => {
+                    // Close current segment
+                    if let Some(seg) = self.current_segment_mut(&sid) {
+                        if seg.ended_at.is_none() {
+                            seg.ended_at = Some(now);
+                        }
+                    }
+                }
+                EventKind::SessionEnd | EventKind::StopFailure => {
+                    // Close current segment
+                    if let Some(seg) = self.current_segment_mut(&sid) {
+                        if seg.ended_at.is_none() {
+                            seg.ended_at = Some(now);
+                        }
+                    }
+                    // Force-close all active agents
+                    if let Some(record) = self.session_records.get_mut(&sid) {
+                        for agent in &mut record.agent_records {
+                            if agent.ended_at.is_none() {
+                                agent.ended_at = Some(now);
+                            }
+                        }
+                        record.ended = true;
+                    }
+                }
+                EventKind::TaskCreated => {
+                    let task_id = event
+                        .payload
+                        .get("task_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let teammate_name = event
+                        .payload
+                        .get("teammate_name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(seg) = self.current_segment_mut(&sid) {
+                        seg.tasks.push(TaskInfo {
+                            task_id,
+                            teammate_name,
+                            completed: false,
+                        });
+                    }
+                }
+                EventKind::TaskCompleted => {
+                    if let Some(task_id) = event.payload.get("task_id").and_then(|v| v.as_str()) {
+                        if let Some(seg) = self.current_segment_mut(&sid) {
+                            if let Some(task) =
+                                seg.tasks.iter_mut().rfind(|t| t.task_id == task_id)
+                            {
+                                task.completed = true;
+                            }
+                        }
+                    }
+                }
+                EventKind::SessionStart => {
+                    // Session already created by get_or_create_session above.
+                    // SessionStart can re-open an ended session (handled by the
+                    // already_ended check above allowing SessionStart through).
+                }
+                _ => {}
+            }
         }
 
         // Keep existing flat queue behavior
@@ -477,11 +762,10 @@ impl App {
             KeyCode::Esc => self.on_esc(),
             KeyCode::Tab => {
                 self.active_tab = self.active_tab.next();
-                // Reset target tab's focus and scroll
+                // Reset target tab's focus and scroll — except Sessions (preserves drill-down)
                 match self.active_tab {
                     Tab::Sessions => {
-                        self.session_focus = ListDetailFocus::List;
-                        self.session_detail_scroll = 0;
+                        // Tab switch does NOT reset session_focus (design requirement)
                     }
                     Tab::Events => {
                         self.event_focus = ListDetailFocus::List;
@@ -506,7 +790,7 @@ impl App {
             }
             KeyCode::PageDown => {
                 match self.active_tab {
-                    Tab::Sessions if self.session_focus == ListDetailFocus::Detail => {
+                    Tab::Sessions if self.session_focus == SessionFocus::Detail => {
                         self.session_detail_scroll += 5;
                     }
                     Tab::Events if self.event_focus == ListDetailFocus::Detail => {
@@ -520,7 +804,7 @@ impl App {
             }
             KeyCode::PageUp => {
                 match self.active_tab {
-                    Tab::Sessions if self.session_focus == ListDetailFocus::Detail => {
+                    Tab::Sessions if self.session_focus == SessionFocus::Detail => {
                         self.session_detail_scroll = self.session_detail_scroll.saturating_sub(5);
                     }
                     Tab::Events if self.event_focus == ListDetailFocus::Detail => {
@@ -546,11 +830,17 @@ impl App {
     fn on_esc(&mut self) {
         match self.active_tab {
             Tab::Sessions => {
-                if self.session_focus == ListDetailFocus::Detail {
-                    self.session_focus = ListDetailFocus::List;
-                    self.session_detail_scroll = 0;
+                match self.session_focus {
+                    SessionFocus::Detail => {
+                        self.session_focus = SessionFocus::Segment;
+                        self.session_detail_scroll = 0;
+                    }
+                    SessionFocus::Segment => {
+                        self.session_focus = SessionFocus::List;
+                        self.session_segment_selected = 0;
+                    }
+                    SessionFocus::List => {} // No-op at root
                 }
-                // No-op at List level
             }
             Tab::Events => {
                 if self.event_focus == ListDetailFocus::Detail {
@@ -575,11 +865,16 @@ impl App {
     fn navigate_up(&mut self) {
         match self.active_tab {
             Tab::Sessions => match self.session_focus {
-                ListDetailFocus::List => {
+                SessionFocus::List => {
                     self.session_selected = self.session_selected.saturating_sub(1);
+                    self.session_segment_selected = 0;
                     self.session_detail_scroll = 0;
                 }
-                ListDetailFocus::Detail => {
+                SessionFocus::Segment => {
+                    self.session_segment_selected = self.session_segment_selected.saturating_sub(1);
+                    self.session_detail_scroll = 0;
+                }
+                SessionFocus::Detail => {
                     self.session_detail_scroll = self.session_detail_scroll.saturating_sub(1);
                 }
             },
@@ -613,14 +908,27 @@ impl App {
     fn navigate_down(&mut self) {
         match self.active_tab {
             Tab::Sessions => match self.session_focus {
-                ListDetailFocus::List => {
-                    if !self.sessions.is_empty() {
+                SessionFocus::List => {
+                    let count = self.visible_session_records().len();
+                    if count > 0 {
                         self.session_selected =
-                            (self.session_selected + 1).min(self.sessions.len() - 1);
+                            (self.session_selected + 1).min(count - 1);
+                        self.session_segment_selected = 0;
                         self.session_detail_scroll = 0;
                     }
                 }
-                ListDetailFocus::Detail => {
+                SessionFocus::Segment => {
+                    // Bounds checked against selected session's segment count
+                    if let Some(record) = self.selected_session_record() {
+                        let seg_count = record.prompt_segments.len();
+                        if seg_count > 0 {
+                            self.session_segment_selected =
+                                (self.session_segment_selected + 1).min(seg_count - 1);
+                            self.session_detail_scroll = 0;
+                        }
+                    }
+                }
+                SessionFocus::Detail => {
                     self.session_detail_scroll += 1;
                 }
             },
@@ -661,9 +969,15 @@ impl App {
     fn navigate_left(&mut self) {
         match self.active_tab {
             Tab::Sessions => {
-                if self.session_focus == ListDetailFocus::Detail {
-                    self.session_focus = ListDetailFocus::List;
-                    self.session_detail_scroll = 0;
+                match self.session_focus {
+                    SessionFocus::Detail => {
+                        self.session_focus = SessionFocus::Segment;
+                        self.session_detail_scroll = 0;
+                    }
+                    SessionFocus::Segment => {
+                        self.session_focus = SessionFocus::List;
+                    }
+                    SessionFocus::List => {}
                 }
             }
             Tab::Events => {
@@ -686,8 +1000,10 @@ impl App {
     fn navigate_right(&mut self) {
         match self.active_tab {
             Tab::Sessions => {
-                if self.session_focus == ListDetailFocus::List {
-                    self.session_focus = ListDetailFocus::Detail;
+                match self.session_focus {
+                    SessionFocus::List => self.session_focus = SessionFocus::Segment,
+                    SessionFocus::Segment => self.session_focus = SessionFocus::Detail,
+                    SessionFocus::Detail => {}
                 }
             }
             Tab::Events => {
@@ -706,9 +1022,8 @@ impl App {
     fn on_enter(&mut self) {
         match self.active_tab {
             Tab::Sessions => {
-                if self.session_focus == ListDetailFocus::List {
-                    self.session_focus = ListDetailFocus::Detail;
-                }
+                // Enter acts as Right on Sessions tab (same as Config pattern)
+                self.navigate_right();
             }
             Tab::Events => {
                 if self.event_focus == ListDetailFocus::List {
@@ -730,9 +1045,112 @@ impl App {
         }
     }
 
-    /// Returns all sessions (active and inactive)
+    /// Get or create a SessionRecord for the given session_id.
+    /// Creates segment zero if the session is new.
+    pub fn get_or_create_session(
+        &mut self,
+        sid: &str,
+        received_at: DateTime<Utc>,
+    ) -> &mut SessionRecord {
+        if !self.session_records.contains_key(sid) {
+            let record = SessionRecord {
+                session_id: sid.to_string(),
+                first_seen_at: received_at,
+                last_event_at: received_at,
+                ended: false,
+                agent_records: Vec::new(),
+                prompt_segments: vec![PromptSegment {
+                    prompt_text: "(session initialization)".to_string(),
+                    started_at: received_at,
+                    ended_at: None,
+                    agents: Vec::new(),
+                    orchestrator_tools: Vec::new(),
+                    tasks: Vec::new(),
+                }],
+                next_agent_id: 0,
+            };
+            self.session_records.insert(sid.to_string(), record);
+        }
+        let record = self.session_records.get_mut(sid).unwrap();
+        record.last_event_at = received_at;
+        record
+    }
+
+    /// Returns the last (current) segment in the session, if any.
+    pub fn current_segment_mut(&mut self, sid: &str) -> Option<&mut PromptSegment> {
+        self.session_records
+            .get_mut(sid)
+            .and_then(|r| r.prompt_segments.last_mut())
+    }
+
+    /// Find a matching agent for routing events.
+    /// Prefers active agents over completed, matches by agent_type then cwd.
+    pub fn find_agent_for_routing(
+        &self,
+        sid: &str,
+        agent_context_type: Option<&str>,
+        _cwd: Option<&str>,
+    ) -> Option<AgentId> {
+        let act = agent_context_type?;
+        let record = self.session_records.get(sid)?;
+
+        // Prefer active agents, search from newest to oldest
+        let active_match = record
+            .agent_records
+            .iter()
+            .rev()
+            .find(|a| a.is_active() && a.agent_type == act)
+            .map(|a| a.id);
+        if active_match.is_some() {
+            return active_match;
+        }
+
+        // Fallback to completed agents
+        record
+            .agent_records
+            .iter()
+            .rev()
+            .find(|a| a.agent_type == act)
+            .map(|a| a.id)
+    }
+
+    /// Get a mutable reference to an AgentRecord by id.
+    fn agent_record_mut(&mut self, sid: &str, agent_id: AgentId) -> Option<&mut AgentRecord> {
+        self.session_records
+            .get_mut(sid)
+            .and_then(|r| r.agent_records.iter_mut().find(|a| a.id == agent_id))
+    }
+
+    /// Returns all sessions (active and inactive) — old API, kept for migration
     pub fn visible_sessions(&self) -> &[SessionState] {
         &self.sessions
+    }
+
+    /// Returns session records sorted: active (not ended) first by last_event_at desc,
+    /// then ended by last_event_at desc.
+    pub fn visible_session_records(&self) -> Vec<&SessionRecord> {
+        let mut active: Vec<&SessionRecord> = self
+            .session_records
+            .values()
+            .filter(|r| !r.ended)
+            .collect();
+        active.sort_by(|a, b| b.last_event_at.cmp(&a.last_event_at));
+
+        let mut ended: Vec<&SessionRecord> = self
+            .session_records
+            .values()
+            .filter(|r| r.ended)
+            .collect();
+        ended.sort_by(|a, b| b.last_event_at.cmp(&a.last_event_at));
+
+        active.extend(ended);
+        active
+    }
+
+    /// Returns the currently selected session record (based on visible_session_records order)
+    pub fn selected_session_record(&self) -> Option<&SessionRecord> {
+        let records = self.visible_session_records();
+        records.get(self.session_selected).copied()
     }
 
     /// Returns true if the session has sent events to the dashboard
@@ -805,11 +1223,14 @@ mod tests {
         assert_eq!(app.config_focus, ConfigFocus::Category);
         assert!(app.event_auto_scroll);
         assert!(!app.should_quit);
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::List);
         assert_eq!(app.event_focus, ListDetailFocus::List);
         assert_eq!(app.config_detail_scroll, 0);
         assert_eq!(app.session_detail_scroll, 0);
         assert_eq!(app.event_detail_scroll, 0);
+        // New event-sourced session fields
+        assert!(app.session_records.is_empty());
+        assert_eq!(app.session_segment_selected, 0);
     }
 
     #[test]
@@ -902,9 +1323,9 @@ mod tests {
     #[test]
     fn navigate_sessions_up_down() {
         let mut app = App::new(ConfigInventory::default());
-        let s1 = crate::session::parse_session_state(r#"{"workflow":{"phase":"idle"},"tasks":{}}"#).unwrap();
-        let s2 = crate::session::parse_session_state(r#"{"workflow":{"phase":"planning"},"tasks":{}}"#).unwrap();
-        app.update_sessions(vec![s1, s2]);
+        // Create two session records via events
+        app.push_event(make_event_with_session("SessionStart", "sess-a"));
+        app.push_event(make_event_with_session("SessionStart", "sess-b"));
 
         assert_eq!(app.session_selected, 0);
         app.on_key(make_key(KeyCode::Down));
@@ -1608,32 +2029,32 @@ mod tests {
     // --- Focus and per-tab scroll tests ---
 
     #[test]
-    fn enter_transitions_session_list_to_detail() {
+    fn enter_transitions_session_list_to_segment() {
         let mut app = App::new(ConfigInventory::default());
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::List);
 
         app.on_key(make_key(KeyCode::Enter));
-        assert_eq!(app.session_focus, ListDetailFocus::Detail);
+        assert_eq!(app.session_focus, SessionFocus::Segment);
     }
 
     #[test]
-    fn esc_transitions_session_detail_to_list() {
+    fn esc_transitions_session_detail_to_segment() {
         let mut app = App::new(ConfigInventory::default());
-        app.session_focus = ListDetailFocus::Detail;
+        app.session_focus = SessionFocus::Detail;
         app.session_detail_scroll = 5;
 
         app.on_key(make_key(KeyCode::Esc));
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::Segment);
         assert_eq!(app.session_detail_scroll, 0);
     }
 
     #[test]
     fn esc_noop_at_session_list() {
         let mut app = App::new(ConfigInventory::default());
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::List);
 
         app.on_key(make_key(KeyCode::Esc));
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::List);
         assert!(!app.should_quit);
     }
 
@@ -1704,18 +2125,18 @@ mod tests {
     }
 
     #[test]
-    fn tab_switch_resets_session_focus_and_scroll() {
+    fn tab_switch_does_not_reset_session_focus() {
         let mut app = App::new(ConfigInventory::default());
         // Start on Sessions, move to Detail
-        app.session_focus = ListDetailFocus::Detail;
+        app.session_focus = SessionFocus::Detail;
         app.session_detail_scroll = 10;
 
         // Tab to Config, then back through Events to Sessions
         app.on_key(make_key(KeyCode::Tab)); // -> Config
         app.on_key(make_key(KeyCode::Tab)); // -> Events
         app.on_key(make_key(KeyCode::Tab)); // -> Sessions
-        assert_eq!(app.session_focus, ListDetailFocus::List);
-        assert_eq!(app.session_detail_scroll, 0);
+        assert_eq!(app.session_focus, SessionFocus::Detail, "Tab switch must preserve session focus");
+        assert_eq!(app.session_detail_scroll, 10, "Tab switch must preserve session scroll");
     }
 
     #[test]
@@ -1743,7 +2164,7 @@ mod tests {
     #[test]
     fn page_down_increments_session_scroll() {
         let mut app = App::new(ConfigInventory::default());
-        app.session_focus = ListDetailFocus::Detail;
+        app.session_focus = SessionFocus::Detail;
         assert_eq!(app.session_detail_scroll, 0);
 
         app.on_key(make_key(KeyCode::PageDown));
@@ -1756,7 +2177,7 @@ mod tests {
     #[test]
     fn page_up_decrements_session_scroll_with_saturation() {
         let mut app = App::new(ConfigInventory::default());
-        app.session_focus = ListDetailFocus::Detail;
+        app.session_focus = SessionFocus::Detail;
         app.session_detail_scroll = 3;
 
         app.on_key(make_key(KeyCode::PageUp));
@@ -1821,7 +2242,7 @@ mod tests {
     #[test]
     fn session_navigate_down_in_detail_scrolls() {
         let mut app = App::new(ConfigInventory::default());
-        app.session_focus = ListDetailFocus::Detail;
+        app.session_focus = SessionFocus::Detail;
         app.session_detail_scroll = 0;
 
         app.on_key(make_key(KeyCode::Down));
@@ -1831,7 +2252,7 @@ mod tests {
     #[test]
     fn session_navigate_up_in_detail_scrolls() {
         let mut app = App::new(ConfigInventory::default());
-        app.session_focus = ListDetailFocus::Detail;
+        app.session_focus = SessionFocus::Detail;
         app.session_detail_scroll = 3;
 
         app.on_key(make_key(KeyCode::Up));
@@ -1926,22 +2347,22 @@ mod tests {
     }
 
     #[test]
-    fn right_transitions_session_list_to_detail() {
+    fn right_transitions_session_list_to_segment() {
         let mut app = App::new(ConfigInventory::default());
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::List);
 
         app.on_key(make_key(KeyCode::Right));
-        assert_eq!(app.session_focus, ListDetailFocus::Detail);
+        assert_eq!(app.session_focus, SessionFocus::Segment);
     }
 
     #[test]
-    fn left_transitions_session_detail_to_list() {
+    fn left_transitions_session_detail_to_segment() {
         let mut app = App::new(ConfigInventory::default());
-        app.session_focus = ListDetailFocus::Detail;
+        app.session_focus = SessionFocus::Detail;
         app.session_detail_scroll = 5;
 
         app.on_key(make_key(KeyCode::Left));
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::Segment);
         assert_eq!(app.session_detail_scroll, 0);
     }
 
@@ -1999,7 +2420,7 @@ mod tests {
     fn page_down_only_works_in_detail_focus_sessions() {
         let mut app = App::new(ConfigInventory::default());
         // Sessions tab, List focus
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::List);
         app.on_key(make_key(KeyCode::PageDown));
         assert_eq!(
             app.session_detail_scroll, 0,
@@ -2011,7 +2432,7 @@ mod tests {
     fn page_up_only_works_in_detail_focus_sessions() {
         let mut app = App::new(ConfigInventory::default());
         app.session_detail_scroll = 5;
-        assert_eq!(app.session_focus, ListDetailFocus::List);
+        assert_eq!(app.session_focus, SessionFocus::List);
         app.on_key(make_key(KeyCode::PageUp));
         assert_eq!(
             app.session_detail_scroll, 5,
@@ -2086,9 +2507,9 @@ mod tests {
     #[test]
     fn enter_noop_at_session_detail() {
         let mut app = App::new(ConfigInventory::default());
-        app.session_focus = ListDetailFocus::Detail;
+        app.session_focus = SessionFocus::Detail;
         app.on_key(make_key(KeyCode::Enter));
-        assert_eq!(app.session_focus, ListDetailFocus::Detail);
+        assert_eq!(app.session_focus, SessionFocus::Detail);
     }
 
     #[test]
@@ -2225,5 +2646,483 @@ mod tests {
         assert!(ctx.rules.is_empty());
         assert!(ctx.memory.is_empty());
         assert!(ctx.other.is_empty());
+    }
+
+    // --- New event-sourced session_records tests (T2) ---
+
+    #[test]
+    fn push_event_creates_session_record_on_first_event() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("PreToolUse", "s1"));
+
+        assert!(app.session_records.contains_key("s1"));
+        let record = app.session_records.get("s1").unwrap();
+        assert_eq!(record.session_id, "s1");
+        assert!(!record.ended);
+    }
+
+    #[test]
+    fn push_event_creates_segment_zero() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert_eq!(record.prompt_segments.len(), 1);
+        assert_eq!(record.prompt_segments[0].prompt_text, "(session initialization)");
+        assert!(record.prompt_segments[0].ended_at.is_none());
+    }
+
+    #[test]
+    fn push_event_user_prompt_creates_new_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"hello"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert_eq!(record.prompt_segments.len(), 2);
+        assert_eq!(record.prompt_segments[1].prompt_text, "hello");
+        assert!(record.prompt_segments[1].ended_at.is_none());
+    }
+
+    #[test]
+    fn push_event_user_prompt_closes_previous_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"first"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"second"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert_eq!(record.prompt_segments.len(), 3);
+        // Segment zero and first prompt should be closed
+        assert!(record.prompt_segments[0].ended_at.is_some());
+        assert!(record.prompt_segments[1].ended_at.is_some());
+        // Current segment should be open
+        assert!(record.prompt_segments[2].ended_at.is_none());
+    }
+
+    #[test]
+    fn push_event_subagent_start_creates_agent_record() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner","cwd":"/tmp/work"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert_eq!(record.agent_records.len(), 1);
+        assert_eq!(record.agent_records[0].agent_type, "planner");
+        assert_eq!(record.agent_records[0].cwd, Some("/tmp/work".to_string()));
+        assert!(record.agent_records[0].is_active());
+        assert_eq!(record.agent_records[0].id, 0);
+        assert_eq!(record.next_agent_id, 1);
+        // Agent should be linked to current segment
+        assert_eq!(record.prompt_segments[0].agents, vec![0]);
+    }
+
+    #[test]
+    fn push_event_subagent_stop_preserves_agent_data() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
+        ));
+        // Add a tool use to the agent
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Read","agent_context_type":"planner"}"#,
+        ));
+        // Now stop the agent
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStop","session_id":"s1","agent_type":"planner"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert_eq!(record.agent_records.len(), 1);
+        assert!(!record.agent_records[0].is_active());
+        assert!(record.agent_records[0].ended_at.is_some());
+        // Tools should be preserved
+        assert_eq!(record.agent_records[0].tools.len(), 1);
+        assert_eq!(record.agent_records[0].tools[0].name, "Read");
+        assert_eq!(record.agent_records[0].tools[0].count, 1);
+    }
+
+    #[test]
+    fn push_event_post_tool_use_increments_count() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Edit","agent_context_type":"tdd"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Edit","agent_context_type":"tdd"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        let edit = record.agent_records[0]
+            .tools
+            .iter()
+            .find(|t| t.name == "Edit")
+            .unwrap();
+        assert_eq!(edit.count, 2);
+        assert_eq!(edit.failure_count, 0);
+    }
+
+    #[test]
+    fn push_event_pre_tool_use_does_not_increment() {
+        // BUG-1 regression test
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Read","agent_context_type":"tdd"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        // PreToolUse should NOT create any tool record in the new model
+        assert!(
+            record.agent_records[0].tools.is_empty(),
+            "PreToolUse must not increment tool count (BUG-1 fix)"
+        );
+    }
+
+    #[test]
+    fn push_event_session_end_does_not_reactivate() {
+        // BUG-2 regression test
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_event_with_session("SessionEnd", "s1"));
+
+        // Verify ended
+        assert!(app.session_records.get("s1").unwrap().ended);
+
+        // Now send another event — should NOT re-activate
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Read"}"#,
+        ));
+
+        assert!(
+            app.session_records.get("s1").unwrap().ended,
+            "Session must remain ended after receiving events (BUG-2 fix)"
+        );
+    }
+
+    #[test]
+    fn push_event_session_end_force_closes_agents() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd"}"#,
+        ));
+        app.push_event(make_event_with_session("SessionEnd", "s1"));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert!(record.ended);
+        for agent in &record.agent_records {
+            assert!(
+                agent.ended_at.is_some(),
+                "Agent {} should be force-closed on SessionEnd",
+                agent.agent_type
+            );
+        }
+    }
+
+    #[test]
+    fn push_event_instructions_loaded_classifies_to_agent_context() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
+        ));
+        // Load various instruction types with agent context
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/home/.claude/agents/planner.md","agent_context_type":"planner"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/home/.claude/skills/commit-convention/SKILL.md","agent_context_type":"planner"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/home/.claude/rules/workflow.md","agent_context_type":"planner"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/home/.claude/CLAUDE.md","agent_context_type":"planner"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        let ctx = &record.agent_records[0].context;
+        assert_eq!(ctx.agent_definitions, vec!["planner.md"]);
+        assert_eq!(ctx.skills, vec!["SKILL.md"]);
+        assert_eq!(ctx.rules, vec!["workflow.md"]);
+        assert_eq!(ctx.memory, vec!["CLAUDE.md"]);
+    }
+
+    #[test]
+    fn push_event_task_created_in_current_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"do something"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"TaskCreated","session_id":"s1","task_id":"T1","teammate_name":"agent-a"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        let last_seg = record.prompt_segments.last().unwrap();
+        assert_eq!(last_seg.tasks.len(), 1);
+        assert_eq!(last_seg.tasks[0].task_id, "T1");
+        assert!(!last_seg.tasks[0].completed);
+    }
+
+    // --- SessionFocus 3-level navigation tests ---
+
+    #[test]
+    fn session_focus_navigation_list_to_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        assert_eq!(app.session_focus, SessionFocus::List);
+
+        app.on_key(make_key(KeyCode::Right));
+        assert_eq!(app.session_focus, SessionFocus::Segment);
+    }
+
+    #[test]
+    fn session_focus_navigation_segment_to_detail() {
+        let mut app = App::new(ConfigInventory::default());
+        app.session_focus = SessionFocus::Segment;
+
+        app.on_key(make_key(KeyCode::Right));
+        assert_eq!(app.session_focus, SessionFocus::Detail);
+    }
+
+    #[test]
+    fn session_focus_esc_from_detail_to_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        app.session_focus = SessionFocus::Detail;
+        app.session_detail_scroll = 5;
+
+        app.on_key(make_key(KeyCode::Esc));
+        assert_eq!(app.session_focus, SessionFocus::Segment);
+        assert_eq!(app.session_detail_scroll, 0);
+    }
+
+    #[test]
+    fn session_focus_esc_from_segment_to_list() {
+        let mut app = App::new(ConfigInventory::default());
+        app.session_focus = SessionFocus::Segment;
+        app.session_segment_selected = 3;
+
+        app.on_key(make_key(KeyCode::Esc));
+        assert_eq!(app.session_focus, SessionFocus::List);
+        assert_eq!(app.session_segment_selected, 0);
+    }
+
+    #[test]
+    fn session_focus_left_from_detail_to_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        app.session_focus = SessionFocus::Detail;
+
+        app.on_key(make_key(KeyCode::Left));
+        assert_eq!(app.session_focus, SessionFocus::Segment);
+    }
+
+    #[test]
+    fn session_focus_left_from_segment_to_list() {
+        let mut app = App::new(ConfigInventory::default());
+        app.session_focus = SessionFocus::Segment;
+
+        app.on_key(make_key(KeyCode::Left));
+        assert_eq!(app.session_focus, SessionFocus::List);
+    }
+
+    #[test]
+    fn session_focus_navigate_up_in_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        // Create a session with multiple segments
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"first"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"second"}"#,
+        ));
+        app.session_focus = SessionFocus::Segment;
+        app.session_segment_selected = 2;
+
+        app.on_key(make_key(KeyCode::Up));
+        assert_eq!(app.session_segment_selected, 1);
+    }
+
+    #[test]
+    fn session_focus_navigate_down_in_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        // Create a session with multiple segments
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"first"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"second"}"#,
+        ));
+        app.session_focus = SessionFocus::Segment;
+        app.session_segment_selected = 0;
+
+        app.on_key(make_key(KeyCode::Down));
+        assert_eq!(app.session_segment_selected, 1);
+    }
+
+    #[test]
+    fn tab_switch_preserves_session_focus() {
+        let mut app = App::new(ConfigInventory::default());
+        app.session_focus = SessionFocus::Segment;
+        app.session_segment_selected = 2;
+
+        // Tab away and back
+        app.on_key(make_key(KeyCode::Tab)); // -> Config
+        app.on_key(make_key(KeyCode::Tab)); // -> Events
+        app.on_key(make_key(KeyCode::Tab)); // -> Sessions
+
+        assert_eq!(
+            app.session_focus, SessionFocus::Segment,
+            "Tab switch must NOT reset session focus"
+        );
+        assert_eq!(
+            app.session_segment_selected, 2,
+            "Tab switch must NOT reset segment selection"
+        );
+    }
+
+    #[test]
+    fn visible_session_records_sorts_active_first() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_event_with_session("SessionStart", "s2"));
+        app.push_event(make_event_with_session("SessionEnd", "s1"));
+
+        let records = app.visible_session_records();
+        assert_eq!(records.len(), 2);
+        // s2 is active, should be first
+        assert_eq!(records[0].session_id, "s2");
+        assert_eq!(records[1].session_id, "s1");
+    }
+
+    #[test]
+    fn push_event_stop_failure_ends_session() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
+        ));
+        app.push_event(make_event_with_session("StopFailure", "s1"));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert!(record.ended);
+        assert!(record.agent_records[0].ended_at.is_some());
+    }
+
+    #[test]
+    fn push_event_post_tool_failure_increments_both_counts() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","agent_context_type":"tdd"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        let bash = record.agent_records[0]
+            .tools
+            .iter()
+            .find(|t| t.name == "Bash")
+            .unwrap();
+        assert_eq!(bash.count, 1);
+        assert_eq!(bash.failure_count, 1);
+    }
+
+    #[test]
+    fn push_event_orchestrator_tool_goes_to_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        // Tool use without agent context goes to orchestrator (segment level)
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Read"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        let seg = &record.prompt_segments[0];
+        assert_eq!(seg.orchestrator_tools.len(), 1);
+        assert_eq!(seg.orchestrator_tools[0].name, "Read");
+        assert_eq!(seg.orchestrator_tools[0].count, 1);
+    }
+
+    #[test]
+    fn push_event_stop_closes_current_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"test"}"#,
+        ));
+        app.push_event(make_event_with_session("Stop", "s1"));
+
+        let record = app.session_records.get("s1").unwrap();
+        let last_seg = record.prompt_segments.last().unwrap();
+        assert!(last_seg.ended_at.is_some());
+        // Session should NOT be ended on Stop (only on SessionEnd)
+        assert!(!record.ended);
+    }
+
+    #[test]
+    fn push_event_multiple_agents_get_unique_ids() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd","cwd":"/a"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd","cwd":"/b"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert_eq!(record.agent_records[0].id, 0);
+        assert_eq!(record.agent_records[1].id, 1);
+        assert_eq!(record.agent_records[2].id, 2);
+        assert_eq!(record.next_agent_id, 3);
+    }
+
+    #[test]
+    fn find_agent_for_routing_prefers_active() {
+        let mut app = App::new(ConfigInventory::default());
+        // Start and stop one planner
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStop","session_id":"s1","agent_type":"planner"}"#,
+        ));
+        // Start another planner
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
+        ));
+
+        let agent_id = app.find_agent_for_routing("s1", Some("planner"), None);
+        // Should return the active one (id=1), not the completed one (id=0)
+        assert_eq!(agent_id, Some(1));
+    }
+
+    #[test]
+    fn page_down_only_works_in_session_detail() {
+        let mut app = App::new(ConfigInventory::default());
+        app.session_focus = SessionFocus::Segment;
+
+        app.on_key(make_key(KeyCode::PageDown));
+        assert_eq!(app.session_detail_scroll, 0, "PageDown should not work in Segment focus");
+
+        app.session_focus = SessionFocus::Detail;
+        app.on_key(make_key(KeyCode::PageDown));
+        assert_eq!(app.session_detail_scroll, 5, "PageDown should work in Detail focus");
     }
 }
