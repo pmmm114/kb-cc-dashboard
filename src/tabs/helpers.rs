@@ -19,6 +19,9 @@ pub fn detail_line(label: &str, value: &str) -> Line<'static> {
 }
 
 pub fn format_relative_time(unix_ts: u64) -> String {
+    if unix_ts == 0 {
+        return "unknown".to_string();
+    }
     let now = chrono::Utc::now().timestamp() as u64;
     let diff = now.saturating_sub(unix_ts);
     if diff < 60 {
@@ -112,6 +115,12 @@ mod tests {
         let now = chrono::Utc::now().timestamp() as u64;
         let result = format_relative_time(now + 1000);
         assert!(result.contains("0s ago"));
+    }
+
+    #[test]
+    fn format_relative_time_zero_returns_unknown() {
+        let result = format_relative_time(0);
+        assert_eq!(result, "unknown");
     }
 
     #[test]
