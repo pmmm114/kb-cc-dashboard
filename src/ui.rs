@@ -53,8 +53,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
 fn draw_content(f: &mut Frame, app: &App, area: Rect) {
     match app.active_tab {
         Tab::Sessions => {
-            let (list_area, detail_area) = split_list_detail(area);
-            crate::tabs::sessions::draw_sessions(f, app, list_area, detail_area);
+            crate::tabs::sessions::draw_sessions(f, app, area);
         }
         Tab::Config => {
             crate::tabs::config::draw_config(f, app, area);
