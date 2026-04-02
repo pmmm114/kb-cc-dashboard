@@ -26,7 +26,6 @@ pub struct AgentRecord {
     pub id: AgentId,
     pub agent_type: String,
     pub cwd: Option<String>,
-    #[allow(dead_code)] // Planned for agent duration display
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub context: AgentContext,
@@ -62,7 +61,6 @@ pub struct PromptSegment {
 #[derive(Clone, Debug)]
 pub struct SessionRecord {
     pub session_id: String,
-    #[allow(dead_code)] // Planned for session age display
     pub first_seen_at: DateTime<Utc>,
     pub last_event_at: DateTime<Utc>,
     pub ended: bool,

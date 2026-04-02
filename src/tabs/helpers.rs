@@ -19,6 +19,25 @@ pub fn detail_line(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
+/// Formats a duration as a human-readable string.
+/// - < 60s: "Xs"
+/// - < 60m: "Xm Ys"
+/// - >= 60m: "Xh Ym"
+pub fn format_duration(duration: chrono::Duration) -> String {
+    let total_secs = duration.num_seconds().max(0);
+    if total_secs < 60 {
+        format!("{}s", total_secs)
+    } else if total_secs < 3600 {
+        let m = total_secs / 60;
+        let s = total_secs % 60;
+        format!("{}m {}s", m, s)
+    } else {
+        let h = total_secs / 3600;
+        let m = (total_secs % 3600) / 60;
+        format!("{}h {}m", h, m)
+    }
+}
+
 pub fn format_relative_time_dt(dt: &DateTime<Utc>) -> String {
     let diff = Utc::now() - *dt;
     let secs = diff.num_seconds();
@@ -115,6 +134,42 @@ mod tests {
         let dt = chrono::Utc::now() + chrono::Duration::seconds(100);
         let result = format_relative_time_dt(&dt);
         assert_eq!(result, "just now");
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        let d = chrono::Duration::seconds(45);
+        assert_eq!(format_duration(d), "45s");
+    }
+
+    #[test]
+    fn format_duration_minutes_and_seconds() {
+        let d = chrono::Duration::seconds(154); // 2m 34s
+        assert_eq!(format_duration(d), "2m 34s");
+    }
+
+    #[test]
+    fn format_duration_hours_and_minutes() {
+        let d = chrono::Duration::seconds(4500); // 1h 15m
+        assert_eq!(format_duration(d), "1h 15m");
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        let d = chrono::Duration::seconds(0);
+        assert_eq!(format_duration(d), "0s");
+    }
+
+    #[test]
+    fn format_duration_exactly_60s() {
+        let d = chrono::Duration::seconds(60);
+        assert_eq!(format_duration(d), "1m 0s");
+    }
+
+    #[test]
+    fn format_duration_exactly_1h() {
+        let d = chrono::Duration::seconds(3600);
+        assert_eq!(format_duration(d), "1h 0m");
     }
 
     #[test]
