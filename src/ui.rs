@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Tabs},
 };
 
-use crate::app::{App, ConfigFocus, ListDetailFocus, Tab};
+use crate::app::{App, ConfigFocus, ListDetailFocus, SessionFocus, Tab};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -75,13 +75,20 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     match app.active_tab {
         Tab::Sessions => match app.session_focus {
-            ListDetailFocus::List => {
-                spans.extend([hint_key("[up/dn]"), Span::raw(" Select  "), hint_key("[Enter]"), Span::raw(" Detail  ")]);
+            SessionFocus::List => {
+                spans.extend([hint_key("[up/dn]"), Span::raw(" Select  "), hint_key("[Enter/\u{2192}]"), Span::raw(" Segments  ")]);
             }
-            ListDetailFocus::Detail => {
+            SessionFocus::Segment => {
+                spans.extend([
+                    hint_key("[up/dn]"), Span::raw(" Select  "),
+                    hint_key("[Enter/\u{2192}]"), Span::raw(" Detail  "),
+                    hint_key("[Esc/\u{2190}]"), Span::raw(" Back  "),
+                ]);
+            }
+            SessionFocus::Detail => {
                 spans.extend([
                     hint_key("[up/dn]"), Span::raw(" Scroll  "),
-                    hint_key("[Esc]"), Span::raw(" Back  "),
+                    hint_key("[Esc/\u{2190}]"), Span::raw(" Back  "),
                     hint_key("[PgUp/Dn]"), Span::raw(" Page  "),
                 ]);
             }
@@ -269,13 +276,13 @@ mod tests {
     fn status_bar_sessions_list_hints() {
         let mut app = App::new(ConfigInventory::default());
         app.active_tab = Tab::Sessions;
-        app.session_focus = crate::app::ListDetailFocus::List;
+        app.session_focus = crate::app::SessionFocus::List;
         let buf = render_app(&app, 120, 24);
         let content = buffer_to_string(&buf);
         assert!(content.contains("[q]") && content.contains("Quit"), "sessions list: missing [q] Quit");
         assert!(content.contains("[Tab]") && content.contains("Switch"), "sessions list: missing [Tab] Switch");
         assert!(content.contains("Select"), "sessions list: missing Select");
-        assert!(content.contains("[Enter]") && content.contains("Detail"), "sessions list: missing [Enter] Detail");
+        assert!(content.contains("Segments"), "sessions list: missing Segments hint");
         assert!(!content.contains("Filter"), "sessions list: should not show Filter");
         assert!(!content.contains("PgUp"), "sessions list: should not show PgUp/Dn");
     }
@@ -284,13 +291,12 @@ mod tests {
     fn status_bar_sessions_detail_hints() {
         let mut app = App::new(ConfigInventory::default());
         app.active_tab = Tab::Sessions;
-        app.session_focus = crate::app::ListDetailFocus::Detail;
+        app.session_focus = crate::app::SessionFocus::Detail;
         let buf = render_app(&app, 120, 24);
         let content = buffer_to_string(&buf);
         assert!(content.contains("Scroll"), "sessions detail: missing Scroll");
-        assert!(content.contains("[Esc]") && content.contains("Back"), "sessions detail: missing [Esc] Back");
+        assert!(content.contains("Back"), "sessions detail: missing Back");
         assert!(content.contains("PgUp"), "sessions detail: missing PgUp/Dn");
-        assert!(!content.contains("[Enter]"), "sessions detail: should not show [Enter]");
     }
 
     #[test]
