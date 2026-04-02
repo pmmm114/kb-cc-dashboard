@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -32,6 +33,22 @@ pub fn format_relative_time(unix_ts: u64) -> String {
         format!("{}h ago", diff / 3600)
     } else {
         format!("{}d ago", diff / 86400)
+    }
+}
+
+pub fn format_relative_time_dt(dt: &DateTime<Utc>) -> String {
+    let diff = Utc::now() - *dt;
+    let secs = diff.num_seconds();
+    if secs <= 0 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
 
@@ -121,6 +138,41 @@ mod tests {
     fn format_relative_time_zero_returns_unknown() {
         let result = format_relative_time(0);
         assert_eq!(result, "unknown");
+    }
+
+    #[test]
+    fn format_relative_time_dt_seconds() {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let result = format_relative_time_dt(&dt);
+        assert!(result.contains("s ago"), "expected 's ago', got: {result}");
+    }
+
+    #[test]
+    fn format_relative_time_dt_minutes() {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(300);
+        let result = format_relative_time_dt(&dt);
+        assert!(result.contains("m ago"), "expected 'm ago', got: {result}");
+    }
+
+    #[test]
+    fn format_relative_time_dt_hours() {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(7200);
+        let result = format_relative_time_dt(&dt);
+        assert!(result.contains("h ago"), "expected 'h ago', got: {result}");
+    }
+
+    #[test]
+    fn format_relative_time_dt_days() {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(259200);
+        let result = format_relative_time_dt(&dt);
+        assert!(result.contains("d ago"), "expected 'd ago', got: {result}");
+    }
+
+    #[test]
+    fn format_relative_time_dt_future() {
+        let dt = chrono::Utc::now() + chrono::Duration::seconds(100);
+        let result = format_relative_time_dt(&dt);
+        assert_eq!(result, "just now");
     }
 
     #[test]
