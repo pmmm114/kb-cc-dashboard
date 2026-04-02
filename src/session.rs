@@ -1,5 +1,6 @@
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -53,7 +54,39 @@ impl fmt::Display for Phase {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowState {
+    pub phase: Phase,
+    #[serde(default)]
+    pub workflow_id: u64,
+    pub flow_type: Option<String>,
+    pub last_agent: Option<String>,
+    #[serde(default)]
+    pub context_summary: bool,
+    #[serde(default)]
+    pub plan_iteration: u64,
+    pub last_mutation_tool: Option<String>,
+    #[serde(default)]
+    pub has_verification_since_mutation: bool,
+    #[serde(default)]
+    pub updated_at: u64,
+    pub pre_compact_phase: Option<String>,
+    #[serde(default)]
+    pub intake_block_count: u64,
+    #[serde(default)]
+    pub planner_block_count: u64,
+    #[serde(default)]
+    pub plan_communicated: bool,
+}
+
+#[derive(Deserialize)]
+struct SessionStateFile {
+    workflow: WorkflowState,
+    #[serde(default)]
+    tasks: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionState {
     pub phase: Phase,
     #[serde(default)]
@@ -80,6 +113,30 @@ pub struct SessionState {
     pub session_id: String,
     #[serde(skip)]
     pub file_path: String,
+    #[serde(default)]
+    pub tasks: HashMap<String, serde_json::Value>,
+}
+
+pub fn parse_session_state(json: &str) -> Result<SessionState, serde_json::Error> {
+    let file: SessionStateFile = serde_json::from_str(json)?;
+    Ok(SessionState {
+        phase: file.workflow.phase,
+        workflow_id: file.workflow.workflow_id,
+        flow_type: file.workflow.flow_type,
+        last_agent: file.workflow.last_agent,
+        context_summary: file.workflow.context_summary,
+        plan_iteration: file.workflow.plan_iteration,
+        last_mutation_tool: file.workflow.last_mutation_tool,
+        has_verification_since_mutation: file.workflow.has_verification_since_mutation,
+        updated_at: file.workflow.updated_at,
+        pre_compact_phase: file.workflow.pre_compact_phase,
+        intake_block_count: file.workflow.intake_block_count,
+        planner_block_count: file.workflow.planner_block_count,
+        plan_communicated: file.workflow.plan_communicated,
+        session_id: String::new(),
+        file_path: String::new(),
+        tasks: file.tasks,
+    })
 }
 
 #[cfg(test)]
@@ -143,22 +200,25 @@ mod tests {
     #[test]
     fn session_state_deserialize_full_json() {
         let json = r#"{
-            "phase": "idle",
-            "workflow_id": 0,
-            "flow_type": null,
-            "last_agent": null,
-            "context_summary": false,
-            "plan_iteration": 0,
-            "last_mutation_tool": null,
-            "has_verification_since_mutation": false,
-            "updated_at": 1774637390,
-            "pre_compact_phase": null,
-            "intake_block_count": 1,
-            "planner_block_count": 0,
-            "plan_communicated": false
+            "workflow": {
+                "phase": "idle",
+                "workflow_id": 0,
+                "flow_type": null,
+                "last_agent": null,
+                "context_summary": false,
+                "plan_iteration": 0,
+                "last_mutation_tool": null,
+                "has_verification_since_mutation": false,
+                "updated_at": 1774637390,
+                "pre_compact_phase": null,
+                "intake_block_count": 1,
+                "planner_block_count": 0,
+                "plan_communicated": false
+            },
+            "tasks": {}
         }"#;
 
-        let state: SessionState = serde_json::from_str(json).unwrap();
+        let state = parse_session_state(json).unwrap();
         assert_eq!(state.phase, Phase::Idle);
         assert_eq!(state.workflow_id, 0);
         assert!(state.flow_type.is_none());
@@ -175,13 +235,14 @@ mod tests {
         // skip fields default to empty
         assert!(state.session_id.is_empty());
         assert!(state.file_path.is_empty());
+        assert!(state.tasks.is_empty());
     }
 
     #[test]
     fn session_state_deserialize_minimal_json() {
-        // Only required field is phase; all others have defaults
-        let json = r#"{"phase": "implementing"}"#;
-        let state: SessionState = serde_json::from_str(json).unwrap();
+        // Only required field is workflow.phase; all others have defaults
+        let json = r#"{"workflow": {"phase": "implementing"}, "tasks": {}}"#;
+        let state = parse_session_state(json).unwrap();
         assert_eq!(state.phase, Phase::Implementing);
         assert_eq!(state.workflow_id, 0);
         assert_eq!(state.updated_at, 0);
@@ -190,22 +251,25 @@ mod tests {
     #[test]
     fn session_state_deserialize_active_session() {
         let json = r#"{
-            "phase": "plan_review",
-            "workflow_id": 42,
-            "flow_type": "code",
-            "last_agent": "planner",
-            "context_summary": true,
-            "plan_iteration": 2,
-            "last_mutation_tool": "Edit",
-            "has_verification_since_mutation": true,
-            "updated_at": 1774600000,
-            "pre_compact_phase": "planning",
-            "intake_block_count": 3,
-            "planner_block_count": 5,
-            "plan_communicated": true
+            "workflow": {
+                "phase": "plan_review",
+                "workflow_id": 42,
+                "flow_type": "code",
+                "last_agent": "planner",
+                "context_summary": true,
+                "plan_iteration": 2,
+                "last_mutation_tool": "Edit",
+                "has_verification_since_mutation": true,
+                "updated_at": 1774600000,
+                "pre_compact_phase": "planning",
+                "intake_block_count": 3,
+                "planner_block_count": 5,
+                "plan_communicated": true
+            },
+            "tasks": {}
         }"#;
 
-        let state: SessionState = serde_json::from_str(json).unwrap();
+        let state = parse_session_state(json).unwrap();
         assert_eq!(state.phase, Phase::PlanReview);
         assert_eq!(state.workflow_id, 42);
         assert_eq!(state.flow_type, Some("code".to_string()));
@@ -216,5 +280,55 @@ mod tests {
         assert!(state.has_verification_since_mutation);
         assert_eq!(state.pre_compact_phase, Some("planning".to_string()));
         assert!(state.plan_communicated);
+    }
+
+    #[test]
+    fn parse_missing_workflow_key() {
+        let json = r#"{"tasks":{}}"#;
+        assert!(parse_session_state(json).is_err());
+    }
+
+    #[test]
+    fn parse_null_workflow() {
+        let json = r#"{"workflow":null,"tasks":{}}"#;
+        assert!(parse_session_state(json).is_err());
+    }
+
+    #[test]
+    fn parse_missing_tasks_key() {
+        let json = r#"{"workflow":{"phase":"idle"}}"#;
+        let state = parse_session_state(json).unwrap();
+        assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn parse_null_tasks() {
+        let json = r#"{"workflow":{"phase":"idle"},"tasks":null}"#;
+        let result = parse_session_state(json);
+        // If null tasks causes error, that's also acceptable — document the behavior
+        if let Ok(state) = result {
+            assert!(state.tasks.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_tasks_with_entries() {
+        let json = r#"{"workflow":{"phase":"implementing"},"tasks":{"T1":{"status":"completed"}}}"#;
+        let state = parse_session_state(json).unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert!(state.tasks.contains_key("T1"));
+    }
+
+    #[test]
+    fn parse_unknown_workflow_fields_ignored() {
+        let json = r#"{"workflow":{"phase":"idle","unknown_field":"value","another":42},"tasks":{}}"#;
+        let state = parse_session_state(json).unwrap();
+        assert_eq!(state.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn parse_empty_json_object() {
+        let json = r#"{}"#;
+        assert!(parse_session_state(json).is_err());
     }
 }

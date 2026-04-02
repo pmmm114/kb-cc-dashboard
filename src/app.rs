@@ -822,8 +822,8 @@ mod tests {
     #[test]
     fn navigate_sessions_up_down() {
         let mut app = App::new(ConfigInventory::default());
-        let s1: SessionState = serde_json::from_str(r#"{"phase":"idle"}"#).unwrap();
-        let s2: SessionState = serde_json::from_str(r#"{"phase":"planning"}"#).unwrap();
+        let s1 = crate::session::parse_session_state(r#"{"workflow":{"phase":"idle"},"tasks":{}}"#).unwrap();
+        let s2 = crate::session::parse_session_state(r#"{"workflow":{"phase":"planning"},"tasks":{}}"#).unwrap();
         app.update_sessions(vec![s1, s2]);
 
         assert_eq!(app.session_selected, 0);
@@ -1032,7 +1032,7 @@ mod tests {
         let mut app = App::new(ConfigInventory::default());
         assert!(app.sessions.is_empty());
 
-        let s1: SessionState = serde_json::from_str(r#"{"phase":"idle"}"#).unwrap();
+        let s1 = crate::session::parse_session_state(r#"{"workflow":{"phase":"idle"},"tasks":{}}"#).unwrap();
         app.update_sessions(vec![s1]);
         assert_eq!(app.sessions.len(), 1);
 
@@ -1404,8 +1404,8 @@ mod tests {
     // --- visible_sessions tests ---
 
     fn make_session_with_id(id: &str, phase: &str) -> SessionState {
-        let mut s: SessionState =
-            serde_json::from_str(&format!(r#"{{"phase":"{}"}}"#, phase)).unwrap();
+        let json = format!(r#"{{"workflow":{{"phase":"{}"}},"tasks":{{}}}}"#, phase);
+        let mut s = crate::session::parse_session_state(&json).unwrap();
         s.session_id = id.to_string();
         s
     }
@@ -1728,8 +1728,8 @@ mod tests {
     #[test]
     fn session_navigate_up_in_list_resets_scroll() {
         let mut app = App::new(ConfigInventory::default());
-        let s1: SessionState = serde_json::from_str(r#"{"phase":"idle"}"#).unwrap();
-        let s2: SessionState = serde_json::from_str(r#"{"phase":"planning"}"#).unwrap();
+        let s1 = crate::session::parse_session_state(r#"{"workflow":{"phase":"idle"},"tasks":{}}"#).unwrap();
+        let s2 = crate::session::parse_session_state(r#"{"workflow":{"phase":"planning"},"tasks":{}}"#).unwrap();
         app.update_sessions(vec![s1, s2]);
         app.session_selected = 1;
         app.session_detail_scroll = 10;

@@ -1,4 +1,4 @@
-use crate::session::SessionState;
+use crate::session::{parse_session_state, SessionState};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,18 @@ impl SessionWatcher {
 
     pub fn load_session(&mut self, path: &Path) -> Option<SessionState> {
         let content = std::fs::read_to_string(path).ok()?;
-        let mut state: SessionState = serde_json::from_str(&content).ok()?;
+        let mut state: SessionState = parse_session_state(&content).ok()?;
+
+        if state.updated_at == 0 {
+            if let Some(mtime) = path
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            {
+                state.updated_at = mtime.as_secs();
+            }
+        }
 
         let session_id = path
             .file_stem()
@@ -96,7 +107,7 @@ mod tests {
 
     fn write_session_file(dir: &Path, id: &str, phase: &str, updated_at: u64) {
         let content = format!(
-            r#"{{"phase":"{}","updated_at":{}}}"#,
+            r#"{{"workflow":{{"phase":"{}","updated_at":{}}},"tasks":{{}}}}"#,
             phase, updated_at
         );
         fs::write(dir.join(format!("{}.json", id)), content).unwrap();
@@ -213,6 +224,31 @@ mod tests {
         let mut watcher = SessionWatcher::new(dir.path().to_path_buf());
         let result = watcher.load_session(&dir.path().join("bad.json"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_session_mtime_fallback_when_updated_at_zero() {
+        let dir = TempDir::new().unwrap();
+        write_session_file(dir.path(), "mtime-test", "idle", 0);
+
+        let mut watcher = SessionWatcher::new(dir.path().to_path_buf());
+        let path = dir.path().join("mtime-test.json");
+        let session = watcher.load_session(&path).unwrap();
+
+        // updated_at should be set to file mtime, which is non-zero
+        assert!(session.updated_at > 0, "expected mtime fallback, got 0");
+    }
+
+    #[test]
+    fn load_session_keeps_original_updated_at_when_nonzero() {
+        let dir = TempDir::new().unwrap();
+        write_session_file(dir.path(), "keep-ts", "idle", 1775135000);
+
+        let mut watcher = SessionWatcher::new(dir.path().to_path_buf());
+        let path = dir.path().join("keep-ts.json");
+        let session = watcher.load_session(&path).unwrap();
+
+        assert_eq!(session.updated_at, 1775135000);
     }
 
     #[test]
