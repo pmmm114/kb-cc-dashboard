@@ -2372,6 +2372,58 @@ mod tests {
         assert!(!last_seg.tasks[0].completed);
     }
 
+    #[test]
+    fn push_event_segment_zero_absorbs_pre_prompt_events() {
+        let mut app = App::new(ConfigInventory::default());
+        // Send InstructionsLoaded and tool events before any UserPromptSubmit
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SessionStart","session_id":"s1"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Read"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        // Only segment zero should exist
+        assert_eq!(record.prompt_segments.len(), 1);
+        assert_eq!(record.prompt_segments[0].prompt_text, "(session initialization)");
+        // The orchestrator tool should be in segment zero
+        assert_eq!(record.prompt_segments[0].orchestrator_tools.len(), 1);
+        assert_eq!(record.prompt_segments[0].orchestrator_tools[0].name, "Read");
+    }
+
+    #[test]
+    fn push_event_session_end_events_do_not_create_new_segments() {
+        // BUG-2 extended: events after SessionEnd should not create segments or agents
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_event_with_session("SessionEnd", "s1"));
+
+        let seg_count_before = app.session_records.get("s1").unwrap().prompt_segments.len();
+        let agent_count_before = app.session_records.get("s1").unwrap().agent_records.len();
+
+        // These events should be ignored on an ended session
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"late"}"#,
+        ));
+
+        let record = app.session_records.get("s1").unwrap();
+        assert!(record.ended, "Session must remain ended");
+        assert_eq!(
+            record.prompt_segments.len(),
+            seg_count_before,
+            "No new segments should be created after SessionEnd"
+        );
+        assert_eq!(
+            record.agent_records.len(),
+            agent_count_before,
+            "No new agents should be created after SessionEnd"
+        );
+    }
+
     // --- SessionFocus 3-level navigation tests ---
 
     #[test]

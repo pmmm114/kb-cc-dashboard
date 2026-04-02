@@ -287,6 +287,19 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_sessions_segment_hints() {
+        let mut app = App::new(ConfigInventory::default());
+        app.active_tab = Tab::Sessions;
+        app.session_focus = crate::app::SessionFocus::Segment;
+        let buf = render_app(&app, 120, 24);
+        let content = buffer_to_string(&buf);
+        assert!(content.contains("Select"), "sessions segment: missing Select");
+        assert!(content.contains("Detail"), "sessions segment: missing Detail hint");
+        assert!(content.contains("Back"), "sessions segment: missing Back");
+        assert!(!content.contains("PgUp"), "sessions segment: should not show PgUp/Dn");
+    }
+
+    #[test]
     fn status_bar_sessions_detail_hints() {
         let mut app = App::new(ConfigInventory::default());
         app.active_tab = Tab::Sessions;
