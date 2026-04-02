@@ -1,6 +1,5 @@
 use crate::config::ConfigInventory;
 use crate::event::{EventKind, HookEvent};
-use crate::session::SessionState;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -11,14 +10,6 @@ pub struct ToolRecord {
     pub name: String,
     pub count: usize,
     pub failure_count: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct ActiveAgent {
-    pub agent_type: String,
-    pub cwd: Option<String>,
-    pub tools: Vec<ToolRecord>,
-    pub rules: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -197,7 +188,6 @@ pub enum ListDetailFocus {
 
 pub struct App {
     pub active_tab: Tab,
-    pub sessions: Vec<SessionState>,
     pub config: ConfigInventory,
     pub events: VecDeque<HookEvent>,
 
@@ -224,13 +214,7 @@ pub struct App {
     pub active_session_ids: HashSet<String>,
     pub events_session_filter: Option<String>,
 
-    // Agent-to-tool hierarchy
-    pub session_active_agents: HashMap<String, Vec<ActiveAgent>>,
-    pub session_orchestrator_tools: HashMap<String, Vec<ToolRecord>>,
-    pub session_orchestrator_rules: HashMap<String, HashSet<String>>,
-    pub session_tasks: HashMap<String, Vec<TaskInfo>>,
-
-    // Event-sourced session data (new — T2)
+    // Event-sourced session data
     pub session_records: HashMap<String, SessionRecord>,
     pub session_segment_selected: usize,
 }
@@ -239,7 +223,6 @@ impl App {
     pub fn new(config: ConfigInventory) -> Self {
         Self {
             active_tab: Tab::Sessions,
-            sessions: Vec::new(),
             config,
             events: VecDeque::new(),
             session_selected: 0,
@@ -257,10 +240,6 @@ impl App {
             session_events: HashMap::new(),
             active_session_ids: HashSet::new(),
             events_session_filter: None,
-            session_active_agents: HashMap::new(),
-            session_orchestrator_tools: HashMap::new(),
-            session_orchestrator_rules: HashMap::new(),
-            session_tasks: HashMap::new(),
             session_records: HashMap::new(),
             session_segment_selected: 0,
         }
@@ -282,123 +261,7 @@ impl App {
             session_queue.pop_front();
         }
 
-        // Old aggregation based on event kind
-        match event.kind() {
-            EventKind::SubagentStart => {
-                if let Some(agent_type) = event.payload.get("agent_type").and_then(|v| v.as_str())
-                {
-                    let cwd = event
-                        .payload
-                        .get("cwd")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let agent = ActiveAgent {
-                        agent_type: agent_type.to_string(),
-                        cwd,
-                        tools: Vec::new(),
-                        rules: HashSet::new(),
-                    };
-                    self.session_active_agents
-                        .entry(sid.clone())
-                        .or_default()
-                        .push(agent);
-                }
-            }
-            EventKind::SubagentStop => {
-                if let Some(agent_type) = event.payload.get("agent_type").and_then(|v| v.as_str())
-                {
-                    let cwd = event
-                        .payload
-                        .get("cwd")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    if let Some(agents) = self.session_active_agents.get_mut(&sid) {
-                        if let Some(pos) = agents.iter().rposition(|a| {
-                            a.agent_type == agent_type && a.cwd == cwd
-                        }) {
-                            agents.remove(pos);
-                        }
-                    }
-                }
-            }
-            EventKind::InstructionsLoaded => {
-                if let Some(file_path) = event.payload.get("file_path").and_then(|v| v.as_str()) {
-                    let name = std::path::Path::new(file_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(file_path)
-                        .to_string();
-                    let agent_ctx = event
-                        .payload
-                        .get("agent_context_type")
-                        .and_then(|v| v.as_str());
-                    let routed_to_agent = agent_ctx
-                        .and_then(|act| self.find_active_agent_mut(&sid, act))
-                        .map(|agent| agent.rules.insert(name.clone()))
-                        .is_some();
-                    if !routed_to_agent {
-                        self.session_orchestrator_rules
-                            .entry(sid.clone())
-                            .or_default()
-                            .insert(name);
-                    }
-                }
-            }
-            EventKind::PreToolUse | EventKind::PostToolUse => {
-                if let Some(tool_name) = event.payload.get("tool_name").and_then(|v| v.as_str()) {
-                    let agent_ctx = event
-                        .payload
-                        .get("agent_context_type")
-                        .and_then(|v| v.as_str());
-                    self.increment_tool(&sid, tool_name, agent_ctx, false);
-                }
-            }
-            EventKind::PostToolUseFailure => {
-                if let Some(tool_name) = event.payload.get("tool_name").and_then(|v| v.as_str()) {
-                    let agent_ctx = event
-                        .payload
-                        .get("agent_context_type")
-                        .and_then(|v| v.as_str());
-                    self.increment_tool(&sid, tool_name, agent_ctx, true);
-                }
-            }
-            EventKind::TaskCreated => {
-                let task_id = event
-                    .payload
-                    .get("task_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let teammate_name = event
-                    .payload
-                    .get("teammate_name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                self.session_tasks
-                    .entry(sid.clone())
-                    .or_default()
-                    .push(TaskInfo {
-                        task_id,
-                        teammate_name,
-                        completed: false,
-                    });
-            }
-            EventKind::TaskCompleted => {
-                if let Some(task_id) = event.payload.get("task_id").and_then(|v| v.as_str()) {
-                    if let Some(tasks) = self.session_tasks.get_mut(&sid) {
-                        if let Some(task) = tasks.iter_mut().rfind(|t| t.task_id == task_id) {
-                            task.completed = true;
-                        }
-                    }
-                }
-            }
-            EventKind::SessionEnd => {
-                self.active_session_ids.remove(&sid);
-            }
-            _ => {}
-        }
-
-        // --- New event-sourced session_records ---
+        // --- Event-sourced session_records ---
 
         // BUG-2 fix: skip re-activation if session already ended (except SessionStart)
         let already_ended = self
@@ -634,6 +497,7 @@ impl App {
                         }
                         record.ended = true;
                     }
+                    self.active_session_ids.remove(&sid);
                 }
                 EventKind::TaskCreated => {
                     let task_id = event
@@ -688,50 +552,6 @@ impl App {
         }
     }
 
-    /// Find the last active agent matching the given agent_context_type.
-    pub fn find_active_agent_mut(
-        &mut self,
-        sid: &str,
-        agent_context_type: &str,
-    ) -> Option<&mut ActiveAgent> {
-        self.session_active_agents
-            .get_mut(sid)
-            .and_then(|agents| {
-                agents
-                    .iter_mut()
-                    .rev()
-                    .find(|a| a.agent_type == agent_context_type)
-            })
-    }
-
-    /// Increment a tool record, routing to the matching active agent or the orchestrator.
-    fn increment_tool(
-        &mut self,
-        sid: &str,
-        tool_name: &str,
-        agent_context_type: Option<&str>,
-        is_failure: bool,
-    ) {
-        let tools = if let Some(act) = agent_context_type {
-            if let Some(agent) = self.find_active_agent_mut(sid, act) {
-                &mut agent.tools
-            } else {
-                self.session_orchestrator_tools
-                    .entry(sid.to_string())
-                    .or_default()
-            }
-        } else {
-            self.session_orchestrator_tools
-                .entry(sid.to_string())
-                .or_default()
-        };
-        let record = Self::get_or_create_tool(tools, tool_name);
-        record.count += 1;
-        if is_failure {
-            record.failure_count += 1;
-        }
-    }
-
     /// Get or create a ToolRecord by name in the given tool vec.
     pub fn get_or_create_tool<'a>(tools: &'a mut Vec<ToolRecord>, name: &str) -> &'a mut ToolRecord {
         let pos = tools.iter().position(|t| t.name == name);
@@ -745,13 +565,6 @@ impl App {
                 });
                 tools.last_mut().unwrap()
             }
-        }
-    }
-
-    pub fn update_sessions(&mut self, sessions: Vec<SessionState>) {
-        self.sessions = sessions;
-        if self.session_selected >= self.sessions.len() && !self.sessions.is_empty() {
-            self.session_selected = self.sessions.len() - 1;
         }
     }
 
@@ -1121,11 +934,6 @@ impl App {
             .and_then(|r| r.agent_records.iter_mut().find(|a| a.id == agent_id))
     }
 
-    /// Returns all sessions (active and inactive) — old API, kept for migration
-    pub fn visible_sessions(&self) -> &[SessionState] {
-        &self.sessions
-    }
-
     /// Returns session records sorted: active (not ended) first by last_event_at desc,
     /// then ended by last_event_at desc.
     pub fn visible_session_records(&self) -> Vec<&SessionRecord> {
@@ -1216,7 +1024,6 @@ mod tests {
     fn new_app_defaults() {
         let app = App::new(ConfigInventory::default());
         assert_eq!(app.active_tab, Tab::Sessions);
-        assert!(app.sessions.is_empty());
         assert!(app.events.is_empty());
         assert_eq!(app.session_selected, 0);
         assert_eq!(app.config_category, ConfigCategory::Agents);
@@ -1528,19 +1335,6 @@ mod tests {
         assert_eq!(app.config_focus, ConfigFocus::Detail, "Enter should stop at Detail");
     }
 
-    #[test]
-    fn update_sessions_replaces_list() {
-        let mut app = App::new(ConfigInventory::default());
-        assert!(app.sessions.is_empty());
-
-        let s1 = crate::session::parse_session_state(r#"{"workflow":{"phase":"idle"},"tasks":{}}"#).unwrap();
-        app.update_sessions(vec![s1]);
-        assert_eq!(app.sessions.len(), 1);
-
-        app.update_sessions(vec![]);
-        assert!(app.sessions.is_empty());
-    }
-
     // --- Per-session event indexing tests ---
 
     #[test]
@@ -1549,10 +1343,7 @@ mod tests {
         assert!(app.session_events.is_empty());
         assert!(app.active_session_ids.is_empty());
         assert!(app.events_session_filter.is_none());
-        assert!(app.session_active_agents.is_empty());
-        assert!(app.session_orchestrator_tools.is_empty());
-        assert!(app.session_orchestrator_rules.is_empty());
-        assert!(app.session_tasks.is_empty());
+        assert!(app.session_records.is_empty());
     }
 
     #[test]
@@ -1602,248 +1393,6 @@ mod tests {
         assert!(app.active_session_ids.contains("sess-b"));
     }
 
-    // --- Aggregation tests ---
-
-    #[test]
-    fn push_event_tracks_subagent_start() {
-        let mut app = App::new(ConfigInventory::default());
-        let event = make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
-        );
-        app.push_event(event);
-
-        let agents = app.session_active_agents.get("s1").unwrap();
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].agent_type, "planner");
-        assert!(agents[0].cwd.is_none());
-        assert!(agents[0].tools.is_empty());
-        assert!(agents[0].rules.is_empty());
-    }
-
-    #[test]
-    fn push_event_tracks_subagent_start_with_cwd() {
-        let mut app = App::new(ConfigInventory::default());
-        let event = make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd-implementer","cwd":"/tmp/worktree-a"}"#,
-        );
-        app.push_event(event);
-
-        let agents = app.session_active_agents.get("s1").unwrap();
-        assert_eq!(agents[0].cwd, Some("/tmp/worktree-a".to_string()));
-    }
-
-    #[test]
-    fn push_event_removes_agent_on_subagent_stop() {
-        let mut app = App::new(ConfigInventory::default());
-        let start = make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
-        );
-        let stop = make_test_event(
-            r#"{"hook_event_name":"SubagentStop","session_id":"s1","agent_type":"planner"}"#,
-        );
-        app.push_event(start);
-        app.push_event(stop);
-
-        let agents = app.session_active_agents.get("s1").unwrap();
-        assert!(agents.is_empty());
-    }
-
-    #[test]
-    fn push_event_stop_removes_last_match_for_same_type() {
-        let mut app = App::new(ConfigInventory::default());
-        // Two agents of same type but different cwd
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd","cwd":"/a"}"#,
-        ));
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd","cwd":"/b"}"#,
-        ));
-        // Stop the one with cwd /b
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStop","session_id":"s1","agent_type":"tdd","cwd":"/b"}"#,
-        ));
-
-        let agents = app.session_active_agents.get("s1").unwrap();
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].cwd, Some("/a".to_string()));
-    }
-
-    #[test]
-    fn push_event_tracks_orchestrator_rules_without_agent_context() {
-        let mut app = App::new(ConfigInventory::default());
-        let event = make_test_event(
-            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/home/user/.claude/rules/workflow.md"}"#,
-        );
-        app.push_event(event);
-
-        let rules = app.session_orchestrator_rules.get("s1").unwrap();
-        assert!(rules.contains("workflow.md"));
-    }
-
-    #[test]
-    fn push_event_tracks_agent_rules_with_agent_context() {
-        let mut app = App::new(ConfigInventory::default());
-        // Start an agent first
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
-        ));
-        // Load a rule with agent context
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/home/user/.claude/rules/investigation.md","agent_context_type":"planner"}"#,
-        ));
-
-        let agents = app.session_active_agents.get("s1").unwrap();
-        assert!(agents[0].rules.contains("investigation.md"));
-        // Should NOT be in orchestrator rules
-        assert!(app.session_orchestrator_rules.get("s1").is_none());
-    }
-
-    #[test]
-    fn push_event_tracks_orchestrator_tools_without_agent_context() {
-        let mut app = App::new(ConfigInventory::default());
-        let e1 = make_test_event(
-            r#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Read"}"#,
-        );
-        let e2 = make_test_event(
-            r#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Read"}"#,
-        );
-        let e3 = make_test_event(
-            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Edit"}"#,
-        );
-        app.push_event(e1);
-        app.push_event(e2);
-        app.push_event(e3);
-
-        let tools = app.session_orchestrator_tools.get("s1").unwrap();
-        let read = tools.iter().find(|t| t.name == "Read").unwrap();
-        assert_eq!(read.count, 2);
-        let edit = tools.iter().find(|t| t.name == "Edit").unwrap();
-        assert_eq!(edit.count, 1);
-    }
-
-    #[test]
-    fn push_event_tracks_agent_tools_with_agent_context() {
-        let mut app = App::new(ConfigInventory::default());
-        // Start an agent
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"planner"}"#,
-        ));
-        // Tool use with agent context
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Read","agent_context_type":"planner"}"#,
-        ));
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Read","agent_context_type":"planner"}"#,
-        ));
-
-        let agents = app.session_active_agents.get("s1").unwrap();
-        let read = agents[0].tools.iter().find(|t| t.name == "Read").unwrap();
-        assert_eq!(read.count, 2);
-        assert_eq!(read.failure_count, 0);
-        // Should NOT be in orchestrator tools
-        assert!(app.session_orchestrator_tools.get("s1").is_none());
-    }
-
-    #[test]
-    fn push_event_tracks_tool_failure() {
-        let mut app = App::new(ConfigInventory::default());
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash"}"#,
-        ));
-
-        let tools = app.session_orchestrator_tools.get("s1").unwrap();
-        let bash = tools.iter().find(|t| t.name == "Bash").unwrap();
-        assert_eq!(bash.count, 1);
-        assert_eq!(bash.failure_count, 1);
-    }
-
-    #[test]
-    fn push_event_tracks_agent_tool_failure_with_agent_context() {
-        let mut app = App::new(ConfigInventory::default());
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd"}"#,
-        ));
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"PostToolUseFailure","session_id":"s1","tool_name":"Bash","agent_context_type":"tdd"}"#,
-        ));
-
-        let agents = app.session_active_agents.get("s1").unwrap();
-        let bash = agents[0].tools.iter().find(|t| t.name == "Bash").unwrap();
-        assert_eq!(bash.count, 1);
-        assert_eq!(bash.failure_count, 1);
-        // Should NOT be in orchestrator tools
-        assert!(app.session_orchestrator_tools.get("s1").is_none());
-    }
-
-    #[test]
-    fn push_event_rules_fallback_to_orchestrator_when_agent_not_found() {
-        let mut app = App::new(ConfigInventory::default());
-        // Load a rule with agent_context_type but no matching active agent
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s1","file_path":"/rules/workflow.md","agent_context_type":"missing-agent"}"#,
-        ));
-
-        // Should fall back to orchestrator rules
-        let rules = app.session_orchestrator_rules.get("s1").unwrap();
-        assert!(rules.contains("workflow.md"));
-        // No agents should exist
-        assert!(app.session_active_agents.get("s1").is_none());
-    }
-
-    #[test]
-    fn push_event_tracks_task_created() {
-        let mut app = App::new(ConfigInventory::default());
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"TaskCreated","session_id":"s1","task_id":"T1","teammate_name":"agent-a"}"#,
-        ));
-
-        let tasks = app.session_tasks.get("s1").unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].task_id, "T1");
-        assert_eq!(tasks[0].teammate_name, Some("agent-a".to_string()));
-        assert!(!tasks[0].completed);
-    }
-
-    #[test]
-    fn push_event_tracks_task_completed() {
-        let mut app = App::new(ConfigInventory::default());
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"TaskCreated","session_id":"s1","task_id":"T1"}"#,
-        ));
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"TaskCompleted","session_id":"s1","task_id":"T1"}"#,
-        ));
-
-        let tasks = app.session_tasks.get("s1").unwrap();
-        assert!(tasks[0].completed);
-    }
-
-    #[test]
-    fn push_event_orphan_stop_does_not_panic() {
-        let mut app = App::new(ConfigInventory::default());
-        // SubagentStop without matching Start should not crash
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStop","session_id":"s1","agent_type":"unknown"}"#,
-        ));
-        // No agents should exist
-        let agents = app.session_active_agents.get("s1");
-        assert!(agents.is_none() || agents.unwrap().is_empty());
-    }
-
-    #[test]
-    fn find_active_agent_mut_returns_last_match() {
-        let mut app = App::new(ConfigInventory::default());
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd","cwd":"/a"}"#,
-        ));
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"SubagentStart","session_id":"s1","agent_type":"tdd","cwd":"/b"}"#,
-        ));
-
-        let agent = app.find_active_agent_mut("s1", "tdd").unwrap();
-        assert_eq!(agent.cwd, Some("/b".to_string()));
-    }
-
     #[test]
     fn get_or_create_tool_creates_new() {
         let mut tools = Vec::new();
@@ -1865,16 +1414,6 @@ mod tests {
         tr.count += 1;
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].count, 4);
-    }
-
-    #[test]
-    fn push_event_session_end_removes_from_active() {
-        let mut app = App::new(ConfigInventory::default());
-        app.push_event(make_event_with_session("PreToolUse", "s1"));
-        assert!(app.active_session_ids.contains("s1"));
-
-        app.push_event(make_event_with_session("SessionEnd", "s1"));
-        assert!(!app.active_session_ids.contains("s1"));
     }
 
     // --- filtered_events tests ---
@@ -1900,53 +1439,6 @@ mod tests {
         let filtered = app.filtered_events();
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().all(|e| e.session_id == "a"));
-    }
-
-    // --- visible_sessions tests ---
-
-    fn make_session_with_id(id: &str, phase: &str) -> SessionState {
-        let json = format!(r#"{{"workflow":{{"phase":"{}"}},"tasks":{{}}}}"#, phase);
-        let mut s = crate::session::parse_session_state(&json).unwrap();
-        s.session_id = id.to_string();
-        s
-    }
-
-    #[test]
-    fn visible_sessions_returns_all_sessions() {
-        let mut app = App::new(ConfigInventory::default());
-
-        let s1 = make_session_with_id("sess-a", "idle");
-        let s2 = make_session_with_id("sess-b", "planning");
-        app.update_sessions(vec![s1, s2]);
-
-        // Only sess-a has sent events, but visible_sessions returns all
-        app.active_session_ids.insert("sess-a".to_string());
-
-        let visible = app.visible_sessions();
-        assert_eq!(visible.len(), 2);
-    }
-
-    #[test]
-    fn visible_sessions_returns_sessions_even_without_events() {
-        let mut app = App::new(ConfigInventory::default());
-        let s1 = make_session_with_id("sess-a", "idle");
-        app.update_sessions(vec![s1]);
-
-        let visible = app.visible_sessions();
-        assert_eq!(visible.len(), 1);
-    }
-
-    #[test]
-    fn is_session_active_returns_true_for_active() {
-        let mut app = App::new(ConfigInventory::default());
-        app.active_session_ids.insert("sess-a".to_string());
-        assert!(app.is_session_active("sess-a"));
-    }
-
-    #[test]
-    fn is_session_active_returns_false_for_inactive() {
-        let app = App::new(ConfigInventory::default());
-        assert!(!app.is_session_active("sess-a"));
     }
 
     // --- cycle_session_filter tests ---
@@ -2229,9 +1721,9 @@ mod tests {
     #[test]
     fn session_navigate_up_in_list_resets_scroll() {
         let mut app = App::new(ConfigInventory::default());
-        let s1 = crate::session::parse_session_state(r#"{"workflow":{"phase":"idle"},"tasks":{}}"#).unwrap();
-        let s2 = crate::session::parse_session_state(r#"{"workflow":{"phase":"planning"},"tasks":{}}"#).unwrap();
-        app.update_sessions(vec![s1, s2]);
+        // Create two sessions via events
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.push_event(make_event_with_session("SessionStart", "s2"));
         app.session_selected = 1;
         app.session_detail_scroll = 10;
 

@@ -3,8 +3,6 @@ mod config;
 mod config_parser;
 mod event;
 mod listener;
-mod session;
-mod session_watcher;
 mod tabs;
 mod test_helpers;
 mod ui;
@@ -23,7 +21,6 @@ use tokio::sync::mpsc;
 
 use crate::app::App;
 use crate::event::HookEvent;
-use crate::session::SessionState;
 
 #[derive(Parser)]
 #[command(name = "claude-dashboard", about = "Claude Code configuration dashboard")]
@@ -35,10 +32,6 @@ struct Cli {
     /// Path to the Claude Code config directory
     #[arg(long)]
     claude_dir: Option<PathBuf>,
-
-    /// Path to the session state directory
-    #[arg(long, default_value = "/tmp/claude-session")]
-    session_dir: PathBuf,
 }
 
 fn default_claude_dir() -> PathBuf {
@@ -57,20 +50,12 @@ async fn main() -> io::Result<()> {
     let config = config_parser::load_all(&claude_dir);
 
     let (event_tx, mut event_rx) = mpsc::channel::<HookEvent>(256);
-    let (session_tx, mut session_rx) = mpsc::channel::<Vec<SessionState>>(16);
 
     let socket_path = cli.socket_path.clone();
     let socket_path_cleanup = cli.socket_path.clone();
     tokio::spawn(async move {
         if let Err(e) = listener::start_listener(socket_path, event_tx).await {
             eprintln!("Socket listener error: {}", e);
-        }
-    });
-
-    let session_dir = cli.session_dir.clone();
-    tokio::spawn(async move {
-        if let Err(e) = session_watcher::start_session_watcher(session_dir, session_tx).await {
-            eprintln!("Session watcher error: {}", e);
         }
     });
 
@@ -101,11 +86,6 @@ async fn main() -> io::Result<()> {
         // Drain hook event channel
         while let Ok(event) = event_rx.try_recv() {
             app.push_event(event);
-        }
-
-        // Drain session update channel
-        while let Ok(sessions) = session_rx.try_recv() {
-            app.update_sessions(sessions);
         }
     }
 
