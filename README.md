@@ -107,44 +107,7 @@ claude-dashboard [OPTIONS]
 
 ### Events 탭 (2-pane feed)
 
-실시간 hook 이벤트 스트림. 카테고리 아이콘과 에이전트 트리 라인으로 시각적 계층을 제공합니다.
-
-**이벤트 리스트** (좌측)
-
-```
- ⚡ 12:34:56 PostToolUse        Read (orchestrator)
- ◆ 12:34:58 SubagentStart      tdd-implementer
- │ ⚡ 12:35:01 PostToolUse      Bash (tdd-implementer)
- │ ⚡ 12:35:05 PostToolUse      Edit (tdd-implementer)
- ◆ 12:35:10 SubagentStop       tdd-implementer
-```
-
-- 카테고리 아이콘: ⚡ Tool, ◆ Agent, ▶ User, ◻ Task, ⚙ System, ✖ Error
-- `│` 트리 라인 — 에이전트 스코프 내 이벤트를 들여쓰기
-- 에러 이벤트(StopFailure, PostToolUseFailure) — 빨간 배경 강조
-- Sessions 탭에서 `Enter` → Events 탭으로 전환 + 해당 세션 필터 자동 적용
-
-**구조화 디테일** (우측)
-
-이벤트 선택 시 3섹션 구조로 페이로드를 표시합니다:
-
-```
-── PostToolUse ──
-  Tool:             Read
-  Agent Context:    tdd-implementer
-  File:             src/app.rs
-  Duration:         45
-
-── Extra Fields ──
-  custom_field:     hello
-
-── Raw JSON ──
-  { "tool_name": "Read", ... }
-```
-
-- Structured — 이벤트 타입별 주요 필드 요약
-- Extra Fields — 플러그인 커스텀 필드 자동 감지
-- Raw JSON — 전체 페이로드 (항상 표시)
+실시간 hook 이벤트 스트림. `f` 키로 특정 세션의 이벤트만 필터링할 수 있습니다.
 
 ## Keybindings
 
@@ -153,10 +116,10 @@ claude-dashboard [OPTIONS]
 | `Tab` | 탭 전환 (Sessions → Config → Events) |
 | `Up` / `Down` | 항목 선택 또는 스크롤 |
 | `Left` / `Right` | 패인 간 이동 |
-| `Enter` | Sessions: 이벤트 탭으로 전환 + 필터 / 기타: 다음 패인 진입 |
+| `Enter` | 다음 패인으로 진입 |
 | `Esc` | 이전 패인으로 복귀 |
 | `PageUp` / `PageDown` | 디테일 패인 페이지 스크롤 |
-| `f` | 세션별 이벤트 필터 순환 (Events 탭) |
+| `f` | 세션별 이벤트 필터 (Events 탭) |
 | `G` / `End` | 최신 이벤트로 이동 (Events 탭) |
 | `q` | 종료 |
 
