@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -18,20 +19,38 @@ pub fn detail_line(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
-pub fn format_relative_time(unix_ts: u64) -> String {
-    if unix_ts == 0 {
-        return "unknown".to_string();
-    }
-    let now = chrono::Utc::now().timestamp() as u64;
-    let diff = now.saturating_sub(unix_ts);
-    if diff < 60 {
-        format!("{}s ago", diff)
-    } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
-    } else if diff < 86400 {
-        format!("{}h ago", diff / 3600)
+/// Formats a duration as a human-readable string.
+/// - < 60s: "Xs"
+/// - < 60m: "Xm Ys"
+/// - >= 60m: "Xh Ym"
+pub fn format_duration(duration: chrono::Duration) -> String {
+    let total_secs = duration.num_seconds().max(0);
+    if total_secs < 60 {
+        format!("{}s", total_secs)
+    } else if total_secs < 3600 {
+        let m = total_secs / 60;
+        let s = total_secs % 60;
+        format!("{}m {}s", m, s)
     } else {
-        format!("{}d ago", diff / 86400)
+        let h = total_secs / 3600;
+        let m = (total_secs % 3600) / 60;
+        format!("{}h {}m", h, m)
+    }
+}
+
+pub fn format_relative_time_dt(dt: &DateTime<Utc>) -> String {
+    let diff = Utc::now() - *dt;
+    let secs = diff.num_seconds();
+    if secs <= 0 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
 
@@ -83,44 +102,74 @@ mod tests {
     }
 
     #[test]
-    fn format_relative_time_seconds() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now - 30);
-        assert!(result.contains("s ago"));
+    fn format_relative_time_dt_seconds() {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let result = format_relative_time_dt(&dt);
+        assert!(result.contains("s ago"), "expected 's ago', got: {result}");
     }
 
     #[test]
-    fn format_relative_time_minutes() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now - 120);
-        assert!(result.contains("m ago"));
+    fn format_relative_time_dt_minutes() {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(300);
+        let result = format_relative_time_dt(&dt);
+        assert!(result.contains("m ago"), "expected 'm ago', got: {result}");
     }
 
     #[test]
-    fn format_relative_time_hours() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now - 7200);
-        assert!(result.contains("h ago"));
+    fn format_relative_time_dt_hours() {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(7200);
+        let result = format_relative_time_dt(&dt);
+        assert!(result.contains("h ago"), "expected 'h ago', got: {result}");
     }
 
     #[test]
-    fn format_relative_time_days() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now - 172800);
-        assert!(result.contains("d ago"));
+    fn format_relative_time_dt_days() {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(259200);
+        let result = format_relative_time_dt(&dt);
+        assert!(result.contains("d ago"), "expected 'd ago', got: {result}");
     }
 
     #[test]
-    fn format_relative_time_future_timestamp() {
-        let now = chrono::Utc::now().timestamp() as u64;
-        let result = format_relative_time(now + 1000);
-        assert!(result.contains("0s ago"));
+    fn format_relative_time_dt_future() {
+        let dt = chrono::Utc::now() + chrono::Duration::seconds(100);
+        let result = format_relative_time_dt(&dt);
+        assert_eq!(result, "just now");
     }
 
     #[test]
-    fn format_relative_time_zero_returns_unknown() {
-        let result = format_relative_time(0);
-        assert_eq!(result, "unknown");
+    fn format_duration_seconds() {
+        let d = chrono::Duration::seconds(45);
+        assert_eq!(format_duration(d), "45s");
+    }
+
+    #[test]
+    fn format_duration_minutes_and_seconds() {
+        let d = chrono::Duration::seconds(154); // 2m 34s
+        assert_eq!(format_duration(d), "2m 34s");
+    }
+
+    #[test]
+    fn format_duration_hours_and_minutes() {
+        let d = chrono::Duration::seconds(4500); // 1h 15m
+        assert_eq!(format_duration(d), "1h 15m");
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        let d = chrono::Duration::seconds(0);
+        assert_eq!(format_duration(d), "0s");
+    }
+
+    #[test]
+    fn format_duration_exactly_60s() {
+        let d = chrono::Duration::seconds(60);
+        assert_eq!(format_duration(d), "1m 0s");
+    }
+
+    #[test]
+    fn format_duration_exactly_1h() {
+        let d = chrono::Duration::seconds(3600);
+        assert_eq!(format_duration(d), "1h 0m");
     }
 
     #[test]
