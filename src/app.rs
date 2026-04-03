@@ -833,10 +833,23 @@ impl App {
 
     fn on_enter(&mut self) {
         match self.active_tab {
-            Tab::Sessions => {
-                // Enter acts as Right on Sessions tab (same as Config pattern)
-                self.navigate_right();
-            }
+            Tab::Sessions => match self.session_focus {
+                SessionFocus::List => {
+                    // Enter on session list: switch to Events tab filtered to that session
+                    if let Some(record) = self.selected_session_record() {
+                        let sid = record.session_id.clone();
+                        self.events_session_filter = Some(sid);
+                        self.active_tab = Tab::Events;
+                        self.event_selected = 0;
+                        self.event_detail_scroll = 0;
+                        self.event_focus = ListDetailFocus::List;
+                    }
+                }
+                SessionFocus::Segment | SessionFocus::Detail => {
+                    // Enter on segment/detail: drill down (same as Right arrow)
+                    self.navigate_right();
+                }
+            },
             Tab::Events => {
                 if self.event_focus == ListDetailFocus::List {
                     self.event_focus = ListDetailFocus::Detail;
@@ -1525,12 +1538,15 @@ mod tests {
     // --- Focus and per-tab scroll tests ---
 
     #[test]
-    fn enter_transitions_session_list_to_segment() {
+    fn enter_on_sessions_list_no_sessions_is_noop_legacy() {
+        // Previously Enter on List drilled into Segment. Now Enter switches to
+        // Events tab with session filter. With no sessions, it's a no-op.
         let mut app = App::new(ConfigInventory::default());
         assert_eq!(app.session_focus, SessionFocus::List);
 
         app.on_key(make_key(KeyCode::Enter));
-        assert_eq!(app.session_focus, SessionFocus::Segment);
+        assert_eq!(app.session_focus, SessionFocus::List);
+        assert_eq!(app.active_tab, Tab::Sessions);
     }
 
     #[test]
@@ -2842,5 +2858,83 @@ mod tests {
         app.session_focus = SessionFocus::Detail;
         app.on_key(make_key(KeyCode::PageDown));
         assert_eq!(app.session_detail_scroll, 5, "PageDown should work in Detail focus");
+    }
+
+    // --- T3: Session → Events tab linkage via Enter key ---
+
+    #[test]
+    fn enter_on_sessions_list_switches_to_events_tab_with_filter() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.active_tab = Tab::Sessions;
+        app.session_focus = SessionFocus::List;
+        app.session_selected = 0;
+
+        app.on_key(make_key(KeyCode::Enter));
+
+        assert_eq!(app.active_tab, Tab::Events, "Enter should switch to Events tab");
+        assert_eq!(
+            app.events_session_filter,
+            Some("s1".to_string()),
+            "Enter should set session filter to selected session"
+        );
+    }
+
+    #[test]
+    fn enter_on_sessions_list_resets_event_state() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.active_tab = Tab::Sessions;
+        app.session_focus = SessionFocus::List;
+        app.session_selected = 0;
+        // Pre-set some event state
+        app.event_selected = 5;
+        app.event_detail_scroll = 10;
+        app.event_focus = ListDetailFocus::Detail;
+
+        app.on_key(make_key(KeyCode::Enter));
+
+        assert_eq!(app.event_selected, 0, "Enter should reset event_selected");
+        assert_eq!(app.event_detail_scroll, 0, "Enter should reset event_detail_scroll");
+        assert_eq!(app.event_focus, ListDetailFocus::List, "Enter should reset event_focus");
+    }
+
+    #[test]
+    fn enter_on_sessions_list_with_no_sessions_is_noop() {
+        let mut app = App::new(ConfigInventory::default());
+        app.active_tab = Tab::Sessions;
+        app.session_focus = SessionFocus::List;
+
+        app.on_key(make_key(KeyCode::Enter));
+
+        assert_eq!(app.active_tab, Tab::Sessions, "Enter with no sessions should stay on Sessions tab");
+        assert!(app.events_session_filter.is_none(), "Filter should remain None");
+    }
+
+    #[test]
+    fn right_arrow_on_sessions_list_still_drills_into_segments() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.active_tab = Tab::Sessions;
+        app.session_focus = SessionFocus::List;
+
+        app.on_key(make_key(KeyCode::Right));
+
+        assert_eq!(app.session_focus, SessionFocus::Segment, "Right arrow should drill into segments");
+        assert_eq!(app.active_tab, Tab::Sessions, "Right arrow should stay on Sessions tab");
+        assert!(app.events_session_filter.is_none(), "Right arrow should not set filter");
+    }
+
+    #[test]
+    fn enter_on_sessions_segment_still_navigates_right() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_event_with_session("SessionStart", "s1"));
+        app.active_tab = Tab::Sessions;
+        app.session_focus = SessionFocus::Segment;
+
+        app.on_key(make_key(KeyCode::Enter));
+
+        assert_eq!(app.session_focus, SessionFocus::Detail, "Enter on Segment should drill to Detail");
+        assert_eq!(app.active_tab, Tab::Sessions, "Enter on Segment should stay on Sessions tab");
     }
 }

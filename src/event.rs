@@ -88,6 +88,29 @@ impl HookEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventCategory {
+    Tool,
+    Agent,
+    User,
+    Task,
+    System,
+    Error,
+}
+
+impl EventCategory {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            EventCategory::Tool => "⚡",
+            EventCategory::Agent => "◆",
+            EventCategory::User => "▶",
+            EventCategory::Task => "◻",
+            EventCategory::System => "⚙",
+            EventCategory::Error => "✖",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
     InstructionsLoaded,
     PreToolUse,
@@ -130,6 +153,41 @@ impl EventKind {
             "PostCompact" => EventKind::PostCompact,
             "StopFailure" => EventKind::StopFailure,
             _ => EventKind::Unknown,
+        }
+    }
+
+    pub fn category(&self) -> EventCategory {
+        match self {
+            EventKind::PreToolUse | EventKind::PostToolUse | EventKind::PostToolUseFailure => {
+                EventCategory::Tool
+            }
+            EventKind::SubagentStart | EventKind::SubagentStop => EventCategory::Agent,
+            EventKind::UserPromptSubmit | EventKind::PermissionRequest => EventCategory::User,
+            EventKind::TaskCreated | EventKind::TaskCompleted => EventCategory::Task,
+            EventKind::StopFailure => EventCategory::Error,
+            EventKind::SessionStart
+            | EventKind::SessionEnd
+            | EventKind::InstructionsLoaded
+            | EventKind::ConfigChange
+            | EventKind::PreCompact
+            | EventKind::PostCompact
+            | EventKind::Stop
+            | EventKind::Unknown => EventCategory::System,
+        }
+    }
+
+    pub fn known_fields(&self) -> &'static [&'static str] {
+        match self {
+            EventKind::PostToolUse => {
+                &["tool_name", "agent_context_type", "file_path", "duration_ms"]
+            }
+            EventKind::PostToolUseFailure => {
+                &["tool_name", "agent_context_type", "file_path", "error"]
+            }
+            EventKind::SubagentStart => &["agent_type", "cwd", "model"],
+            EventKind::SubagentStop => &["agent_type", "cwd", "duration_ms"],
+            EventKind::StopFailure => &["error", "message"],
+            _ => &[],
         }
     }
 
@@ -333,6 +391,95 @@ mod tests {
         }"#;
         let event: HookEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.summary(), "Read");
+    }
+
+    #[test]
+    fn event_category_icon() {
+        assert_eq!(EventCategory::Tool.icon(), "⚡");
+        assert_eq!(EventCategory::Agent.icon(), "◆");
+        assert_eq!(EventCategory::User.icon(), "▶");
+        assert_eq!(EventCategory::Task.icon(), "◻");
+        assert_eq!(EventCategory::System.icon(), "⚙");
+        assert_eq!(EventCategory::Error.icon(), "✖");
+    }
+
+    #[test]
+    fn event_kind_category_tool() {
+        assert_eq!(EventKind::PreToolUse.category(), EventCategory::Tool);
+        assert_eq!(EventKind::PostToolUse.category(), EventCategory::Tool);
+        assert_eq!(EventKind::PostToolUseFailure.category(), EventCategory::Tool);
+    }
+
+    #[test]
+    fn event_kind_category_agent() {
+        assert_eq!(EventKind::SubagentStart.category(), EventCategory::Agent);
+        assert_eq!(EventKind::SubagentStop.category(), EventCategory::Agent);
+    }
+
+    #[test]
+    fn event_kind_category_user() {
+        assert_eq!(EventKind::UserPromptSubmit.category(), EventCategory::User);
+        assert_eq!(EventKind::PermissionRequest.category(), EventCategory::User);
+    }
+
+    #[test]
+    fn event_kind_category_task() {
+        assert_eq!(EventKind::TaskCreated.category(), EventCategory::Task);
+        assert_eq!(EventKind::TaskCompleted.category(), EventCategory::Task);
+    }
+
+    #[test]
+    fn event_kind_category_system() {
+        assert_eq!(EventKind::SessionStart.category(), EventCategory::System);
+        assert_eq!(EventKind::SessionEnd.category(), EventCategory::System);
+        assert_eq!(EventKind::InstructionsLoaded.category(), EventCategory::System);
+        assert_eq!(EventKind::ConfigChange.category(), EventCategory::System);
+        assert_eq!(EventKind::PreCompact.category(), EventCategory::System);
+        assert_eq!(EventKind::PostCompact.category(), EventCategory::System);
+        assert_eq!(EventKind::Stop.category(), EventCategory::System);
+        assert_eq!(EventKind::Unknown.category(), EventCategory::System);
+    }
+
+    #[test]
+    fn event_kind_category_error() {
+        assert_eq!(EventKind::StopFailure.category(), EventCategory::Error);
+    }
+
+    #[test]
+    fn event_kind_known_fields_post_tool_use() {
+        let fields = EventKind::PostToolUse.known_fields();
+        assert_eq!(fields, &["tool_name", "agent_context_type", "file_path", "duration_ms"]);
+    }
+
+    #[test]
+    fn event_kind_known_fields_post_tool_use_failure() {
+        let fields = EventKind::PostToolUseFailure.known_fields();
+        assert_eq!(fields, &["tool_name", "agent_context_type", "file_path", "error"]);
+    }
+
+    #[test]
+    fn event_kind_known_fields_subagent_start() {
+        let fields = EventKind::SubagentStart.known_fields();
+        assert_eq!(fields, &["agent_type", "cwd", "model"]);
+    }
+
+    #[test]
+    fn event_kind_known_fields_subagent_stop() {
+        let fields = EventKind::SubagentStop.known_fields();
+        assert_eq!(fields, &["agent_type", "cwd", "duration_ms"]);
+    }
+
+    #[test]
+    fn event_kind_known_fields_stop_failure() {
+        let fields = EventKind::StopFailure.known_fields();
+        assert_eq!(fields, &["error", "message"]);
+    }
+
+    #[test]
+    fn event_kind_known_fields_empty_for_others() {
+        assert!(EventKind::SessionStart.known_fields().is_empty());
+        assert!(EventKind::UserPromptSubmit.known_fields().is_empty());
+        assert!(EventKind::Unknown.known_fields().is_empty());
     }
 
     #[test]
