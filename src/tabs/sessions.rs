@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::app::{App, SessionFocus, SessionRecord, ToolRecord};
-use super::helpers::{format_relative_time_dt, render_scroll_indicators};
+use super::helpers::{format_duration, format_relative_time_dt, render_scroll_indicators};
 
 /// Extracts the last path segment if the path looks like a worktree.
 fn extract_worktree_suffix(path: &str) -> Option<&str> {
@@ -289,6 +289,13 @@ fn draw_agent_tree(f: &mut Frame, app: &App, area: Rect) {
         "\u{2550}".repeat(40),
         Style::default().fg(Color::DarkGray),
     )));
+
+    // Session age from first_seen_at
+    let session_age = format_relative_time_dt(&session.first_seen_at);
+    lines.push(Line::from(Span::styled(
+        format!("Session started {}", session_age),
+        Style::default().fg(Color::DarkGray),
+    )));
     lines.push(Line::from(""));
 
     // Orchestrator context (instructions loaded at orchestrator level)
@@ -402,9 +409,14 @@ fn render_agent_node(lines: &mut Vec<Line<'static>>, agent: &crate::app::AgentRe
         }
     }
     let status_str = if agent.is_active() {
-        "\u{25C9} active"
+        let elapsed = Utc::now() - agent.started_at;
+        format!("\u{25C9} {}", format_duration(elapsed))
     } else {
-        "completed"
+        let duration = agent
+            .ended_at
+            .map(|end| end - agent.started_at)
+            .unwrap_or_else(chrono::Duration::zero);
+        format!("completed, {}", format_duration(duration))
     };
     header.push_str(&format!(" ({})", status_str));
 
@@ -695,7 +707,8 @@ mod tests {
         session.prompt_segments[0].agents.push(0);
         app.session_records.insert("sess12345678".to_string(), session);
         let output = render_sessions_widget(&app, 120, 20);
-        assert!(output.contains("active"), "Expected 'active' status, got:\n{}", output);
+        // Active agent shows fisheye indicator with elapsed time, e.g. "(◉ 5m 0s)"
+        assert!(output.contains("\u{25C9}"), "Expected active indicator (fisheye), got:\n{}", output);
     }
 
     #[test]
@@ -782,6 +795,67 @@ mod tests {
         assert!(output.contains("Tasks:"), "Expected 'Tasks:' section, got:\n{}", output);
         assert!(output.contains("T1"), "Expected task T1, got:\n{}", output);
         assert!(output.contains("T2"), "Expected task T2, got:\n{}", output);
+    }
+
+    // --- Agent duration tests ---
+
+    #[test]
+    fn completed_agent_shows_duration() {
+        let mut app = App::new(ConfigInventory::default());
+        let now = Utc::now();
+        let mut session = make_session_record("sess12345678", false);
+        let agent = AgentRecord {
+            id: 0,
+            agent_type: "planner".to_string(),
+            cwd: None,
+            started_at: now - Duration::minutes(2) - Duration::seconds(34),
+            ended_at: Some(now),
+            context: AgentContext::default(),
+            tools: Vec::new(),
+        };
+        session.agent_records.push(agent);
+        session.prompt_segments[0].agents.push(0);
+        app.session_records.insert("sess12345678".to_string(), session);
+        let output = render_sessions_widget(&app, 120, 20);
+        assert!(output.contains("completed, 2m 34s"), "Expected 'completed, 2m 34s', got:\n{}", output);
+    }
+
+    #[test]
+    fn active_agent_shows_elapsed_time() {
+        let mut app = App::new(ConfigInventory::default());
+        let now = Utc::now();
+        let mut session = make_session_record("sess12345678", false);
+        let agent = AgentRecord {
+            id: 0,
+            agent_type: "tdd-implementer".to_string(),
+            cwd: None,
+            started_at: now - Duration::seconds(45),
+            ended_at: None,
+            context: AgentContext::default(),
+            tools: Vec::new(),
+        };
+        session.agent_records.push(agent);
+        session.prompt_segments[0].agents.push(0);
+        app.session_records.insert("sess12345678".to_string(), session);
+        let output = render_sessions_widget(&app, 120, 20);
+        // Active agent should show elapsed time with the active indicator
+        assert!(output.contains("◉"), "Expected active indicator, got:\n{}", output);
+        // Should contain seconds-range duration (the exact number may vary by ~1s)
+        assert!(output.contains("s)"), "Expected elapsed time ending with 's)', got:\n{}", output);
+    }
+
+    // --- Session age test ---
+
+    #[test]
+    fn detail_pane_shows_session_started_age() {
+        let mut app = App::new(ConfigInventory::default());
+        let now = Utc::now();
+        let mut session = make_session_record("sess12345678", false);
+        session.first_seen_at = now - Duration::minutes(10);
+        app.session_records.insert("sess12345678".to_string(), session);
+        let output = render_sessions_widget(&app, 120, 20);
+        assert!(output.contains("Session started"), "Expected 'Session started' line, got:\n{}", output);
+        assert!(output.contains("10m ago"), "Expected '10m ago', got:\n{}", output);
     }
 
     // --- Safety tests ---
