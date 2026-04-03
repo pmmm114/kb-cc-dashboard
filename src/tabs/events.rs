@@ -148,11 +148,21 @@ fn is_error_field(key: &str) -> bool {
     matches!(key, "error" | "message")
 }
 
+/// Extract a human-readable string from a JSON value, using em-dash for missing/null.
+fn json_value_display(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Null) | None => "\u{2014}".to_string(),
+        Some(other) => other.to_string(),
+    }
+}
+
 /// Build the combined lines for all 3 detail sections.
 fn build_detail_lines(event: &crate::event::HookEvent) -> Vec<Line<'static>> {
     let kind = event.kind();
     let known = kind.known_fields();
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let label_width = 18;
 
     // Section 1: Structured Fields (only if known_fields is non-empty)
     if !known.is_empty() {
@@ -162,8 +172,6 @@ fn build_detail_lines(event: &crate::event::HookEvent) -> Vec<Line<'static>> {
             title,
             Style::default().fg(kind_color).add_modifier(Modifier::BOLD),
         )));
-
-        let label_width = 18;
         for &key in known {
             let label = field_label(key);
             let display_label = if label.is_empty() {
@@ -171,15 +179,7 @@ fn build_detail_lines(event: &crate::event::HookEvent) -> Vec<Line<'static>> {
             } else {
                 label.to_string()
             };
-            let value = event
-                .payload
-                .get(key)
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Null => "\u{2014}".to_string(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_else(|| "\u{2014}".to_string());
+            let value = json_value_display(event.payload.get(key));
 
             let value_color =
                 if is_error_field(key) && matches!(kind, EventKind::StopFailure | EventKind::PostToolUseFailure) {
@@ -219,17 +219,8 @@ fn build_detail_lines(event: &crate::event::HookEvent) -> Vec<Line<'static>> {
             "\u{2500}\u{2500} Extra Fields \u{2500}\u{2500}",
             Style::default().fg(Color::DarkGray),
         )));
-        let label_width = 18;
         for key in &extra_keys {
-            let value = event
-                .payload
-                .get(key.as_str())
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Null => "\u{2014}".to_string(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_default();
+            let value = json_value_display(event.payload.get(key.as_str()));
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  {:<width$}", format!("{}:", key), width = label_width),
