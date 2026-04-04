@@ -683,7 +683,15 @@ impl App {
                     self.session_detail_scroll = 0;
                 }
                 SessionFocus::Segment => {
-                    self.session_segment_selected = self.session_segment_selected.saturating_sub(1);
+                    // Segments displayed reversed (newest first at top).
+                    // Visual up = toward higher index (newer segments).
+                    if let Some(record) = self.selected_session_record() {
+                        let seg_count = record.prompt_segments.len();
+                        if seg_count > 0 {
+                            self.session_segment_selected =
+                                (self.session_segment_selected + 1).min(seg_count - 1);
+                        }
+                    }
                     self.session_detail_scroll = 0;
                 }
                 SessionFocus::Detail => {
@@ -730,15 +738,11 @@ impl App {
                     }
                 }
                 SessionFocus::Segment => {
-                    // Bounds checked against selected session's segment count
-                    if let Some(record) = self.selected_session_record() {
-                        let seg_count = record.prompt_segments.len();
-                        if seg_count > 0 {
-                            self.session_segment_selected =
-                                (self.session_segment_selected + 1).min(seg_count - 1);
-                            self.session_detail_scroll = 0;
-                        }
-                    }
+                    // Segments displayed reversed (newest first at top).
+                    // Visual down = toward lower index (older segments).
+                    self.session_segment_selected =
+                        self.session_segment_selected.saturating_sub(1);
+                    self.session_detail_scroll = 0;
                 }
                 SessionFocus::Detail => {
                     self.session_detail_scroll += 1;
@@ -2677,7 +2681,41 @@ mod tests {
     #[test]
     fn session_focus_navigate_up_in_segment() {
         let mut app = App::new(ConfigInventory::default());
-        // Create a session with multiple segments
+        // Create a session with 3 segments (0=init, 1=first, 2=second)
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"first"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"second"}"#,
+        ));
+        app.session_focus = SessionFocus::Segment;
+        app.session_segment_selected = 1;
+
+        // Up in reversed display = toward higher index (newer = visually at top)
+        app.on_key(make_key(KeyCode::Up));
+        assert_eq!(app.session_segment_selected, 2);
+    }
+
+    #[test]
+    fn session_focus_navigate_up_in_segment_clamps_at_max() {
+        let mut app = App::new(ConfigInventory::default());
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"first"}"#,
+        ));
+        app.push_event(make_test_event(
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"second"}"#,
+        ));
+        app.session_focus = SessionFocus::Segment;
+        app.session_segment_selected = 2; // already at max
+
+        app.on_key(make_key(KeyCode::Up));
+        assert_eq!(app.session_segment_selected, 2, "Up at max index should clamp");
+    }
+
+    #[test]
+    fn session_focus_navigate_down_in_segment() {
+        let mut app = App::new(ConfigInventory::default());
+        // Create a session with 3 segments
         app.push_event(make_test_event(
             r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"first"}"#,
         ));
@@ -2687,25 +2725,22 @@ mod tests {
         app.session_focus = SessionFocus::Segment;
         app.session_segment_selected = 2;
 
-        app.on_key(make_key(KeyCode::Up));
+        // Down in reversed display = toward lower index (older = visually at bottom)
+        app.on_key(make_key(KeyCode::Down));
         assert_eq!(app.session_segment_selected, 1);
     }
 
     #[test]
-    fn session_focus_navigate_down_in_segment() {
+    fn session_focus_navigate_down_in_segment_clamps_at_zero() {
         let mut app = App::new(ConfigInventory::default());
-        // Create a session with multiple segments
         app.push_event(make_test_event(
             r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"first"}"#,
-        ));
-        app.push_event(make_test_event(
-            r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"second"}"#,
         ));
         app.session_focus = SessionFocus::Segment;
         app.session_segment_selected = 0;
 
         app.on_key(make_key(KeyCode::Down));
-        assert_eq!(app.session_segment_selected, 1);
+        assert_eq!(app.session_segment_selected, 0, "Down at index 0 should clamp");
     }
 
     #[test]
