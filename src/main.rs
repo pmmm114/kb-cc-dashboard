@@ -1,12 +1,3 @@
-mod app;
-mod config;
-mod config_parser;
-mod event;
-mod listener;
-mod tabs;
-mod test_helpers;
-mod ui;
-
 use std::io;
 use std::path::PathBuf;
 
@@ -19,8 +10,11 @@ use crossterm::{
 use ratatui::prelude::*;
 use tokio::sync::mpsc;
 
-use crate::app::App;
-use crate::event::HookEvent;
+use claude_dashboard::app::App;
+use claude_dashboard::config_parser;
+use claude_dashboard::event::HookEvent;
+use claude_dashboard::listener;
+use claude_dashboard::ui;
 
 #[derive(Parser)]
 #[command(name = "claude-dashboard", about = "Claude Code configuration dashboard")]
