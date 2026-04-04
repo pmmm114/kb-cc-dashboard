@@ -116,7 +116,7 @@ fn draw_event_list(f: &mut Frame, app: &App, area: Rect) {
     let title = format!("Events ({}){}{}", events.len(), filter_label, auto_indicator);
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     let selected = app.event_selected.min(events.len().saturating_sub(1));
     let mut state = ListState::default();
@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn highlight_style_uses_darkgray_bold() {
+    fn highlight_style_uses_reversed() {
         let mut app = App::new(ConfigInventory::default());
         app.push_event(event_from_name("PreToolUse"));
         app.push_event(event_from_name("PostToolUse"));
@@ -617,20 +617,20 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        // Scan row 1 (first event row after border) for a cell with DarkGray background.
+        // Scan row 1 (first event row after border) for a cell with REVERSED modifier.
         // The highlight style applies to the selected row's content cells.
         let first_event_row = 1;
-        let mut found_darkgray = false;
+        let mut found_reversed = false;
         for x in 0..120 {
             let cell = &buf[(x, first_event_row)];
-            if cell.bg == Color::DarkGray {
-                found_darkgray = true;
+            if cell.modifier.contains(Modifier::REVERSED) {
+                found_reversed = true;
                 break;
             }
         }
         assert!(
-            found_darkgray,
-            "Expected at least one cell with DarkGray background on selected row"
+            found_reversed,
+            "Expected at least one cell with REVERSED modifier on selected row"
         );
     }
 

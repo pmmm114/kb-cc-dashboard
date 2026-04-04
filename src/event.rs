@@ -194,9 +194,9 @@ impl EventKind {
     pub fn color(&self) -> Color {
         match self {
             // Tool events
-            EventKind::PreToolUse | EventKind::PostToolUse | EventKind::PostToolUseFailure => {
-                Color::Blue
-            }
+            EventKind::PreToolUse => Color::DarkGray,
+            EventKind::PostToolUse => Color::Blue,
+            EventKind::PostToolUseFailure => Color::Red,
             // Agent events
             EventKind::SubagentStart | EventKind::SubagentStop => Color::Magenta,
             // Lifecycle events
@@ -484,9 +484,10 @@ mod tests {
 
     #[test]
     fn event_kind_colors_are_assigned() {
-        // Tool events are blue
-        assert_eq!(EventKind::PreToolUse.color(), Color::Blue);
+        // Tool events: Pre is dim, Post is blue, Failure is red
+        assert_eq!(EventKind::PreToolUse.color(), Color::DarkGray);
         assert_eq!(EventKind::PostToolUse.color(), Color::Blue);
+        assert_eq!(EventKind::PostToolUseFailure.color(), Color::Red);
         // Agent events are magenta
         assert_eq!(EventKind::SubagentStart.color(), Color::Magenta);
         // Error events are red
